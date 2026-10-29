@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/JimLiu/baoyu-skills",
+  "commit": "1567581c26ec29f4216c6e6835415bf30343b0e3",
+  "license": "MIT",
+  "files": [
+    "LICENSE",
+    "skills/baoyu-xhs-images/references/workflows/analysis-framework.md",
+    "skills/baoyu-xhs-images/references/workflows/prompt-assembly.md",
+    "skills/baoyu-xhs-images/references/presets/notion.md",
+    "skills/baoyu-xhs-images/references/presets/warm.md",
+    "skills/baoyu-xhs-images/references/presets/minimal.md",
+    "skills/baoyu-xhs-images/references/presets/bold.md",
+    "skills/baoyu-article-illustrator/references/styles/editorial.md",
+    "skills/baoyu-article-illustrator/references/styles/blueprint.md"
+  ]
+}

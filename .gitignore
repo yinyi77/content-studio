@@ -1,0 +1,19 @@
+# Local runtime data: API credentials, source content and generated images.
+/data/
+.env
+.env.*
+!.env.example
+.baoyu-skills/
+
+# Local snapshots and verification screenshots are not project source.
+/备份/
+/验证/
+/backups/
+/coverage/
+/node_modules/
+
+# Credentials and machine-specific files.
+*.pem
+*.key
+*.log
+.DS_Store

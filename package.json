@@ -1,0 +1,9 @@
+{
+  "name": "content-studio-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "本地图文创作工作台，复用 baoyu-skills 内容与风格参考",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.mjs", "test": "node --test test/*.mjs", "check": "node --check server.mjs && node --check public/app.js" }
+}
