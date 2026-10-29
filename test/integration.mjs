@@ -108,7 +108,7 @@ test('local content studio: mocked end-to-end workflow and isolation', { timeout
   async function start() {
     childLog = '';
     child = spawn(process.execPath, ['server.mjs'], {
-      cwd: root, env: { ...process.env, PORT: '19483', DATA_DIR: dataDir }, stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: root, env: { ...process.env, PORT: '19483', DATA_DIR: dataDir, TRENDS_AUTO_REFRESH: '0' }, stdio: ['ignore', 'pipe', 'pipe'],
     });
     child.stdout.on('data', b => { childLog += b; });
     child.stderr.on('data', b => { childLog += b; });

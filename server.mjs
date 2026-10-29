@@ -6,16 +6,23 @@ import { randomUUID } from 'node:crypto';
 import { Storage, zip } from './lib/storage.mjs';
 import { styles, modes, planningMessages, renderingPrompt } from './lib/prompts.mjs';
 import { normalizeBase, textCompletion, parsePlan, listModels, generateImage } from './lib/providers.mjs';
+import { normalizeBriefRequest, briefingMessages, parseBriefingResponse } from './lib/briefing.mjs';
+import { TrendsService } from './lib/trends.mjs';
+import { buildTrendMatchContext } from './lib/trend-matching.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4318);
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('PORT 必须是有效端口');
 const store = new Storage(path.resolve(process.env.DATA_DIR || path.join(root, 'data')));
 await store.init();
+const trends = new TrendsService({ dir: store.root, autoRefresh: process.env.TRENDS_AUTO_REFRESH !== '0',
+  fallbackBase: process.env.TRENDS_60S_BASE_URL || 'https://60s.viki.moe' });
+await trends.init();
 const defaults = { text: { baseUrl: '', model: '', apiKey: '' }, image: { baseUrl: '', model: '', apiKey: '', mode: 'images', size: 'auto' } };
 let config = await store.config() || structuredClone(defaults);
 const jobs = new Set();
 let mutationInFlight = false;
+let briefRequests = 0;
 const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 const allowedOrigins = new Set([...allowedHosts].map(x => `http://${x}`));
 const running = project => jobs.has(project.id);
@@ -150,6 +157,32 @@ function newProject(input) {
 }
 async function api(req, res, url) {
   const method = req.method, pathname = url.pathname;
+  if (pathname === '/api/trends') {
+    if (method !== 'GET') fail('热点列表仅支持 GET 请求', 405);
+    return send(res, 200, trends.snapshot());
+  }
+  if (pathname === '/api/trends/refresh') {
+    if (method !== 'POST') fail('刷新热点仅支持 POST 请求', 405);
+    await body(req);
+    return send(res, 202, trends.startRefresh({ manual: true }));
+  }
+  if (pathname === '/api/trends/settings') {
+    if (method !== 'PUT') fail('热点设置仅支持 PUT 请求', 405);
+    return send(res, 200, await trends.updateSettings(await body(req)));
+  }
+  if (pathname === '/api/brief/chat') {
+    if (method !== 'POST') fail('创作对话仅支持 POST 请求', 405);
+    requireConfig('text');
+    const input = normalizeBriefRequest(await body(req));
+    if (briefRequests >= 2) fail('已有两个创作分析正在进行，请稍后再试', 429);
+    const snapshot = structuredClone(config.text);
+    const trendContext = buildTrendMatchContext(input.matchTrends ? trends.snapshot() : null, { messages: input.messages, enabled: input.matchTrends });
+    briefRequests++;
+    try {
+      const response = await textCompletion(snapshot, briefingMessages(input, trendContext));
+      return send(res, 200, parseBriefingResponse(response, input.preferences, trendContext));
+    } finally { briefRequests--; }
+  }
   if (pathname === '/api/config' && method === 'GET') return send(res, 200, safeConfig());
   if (pathname === '/api/config' && method === 'PUT') {
     if (jobs.size) fail('有创作任务正在运行，完成后再更改模型设置', 409);
@@ -252,7 +285,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) {
       // Serialize short mutations across browser tabs. Reserve before any await,
       // so duplicate clicks cannot start two billed jobs from the same draft.
-      const mutating = !['GET', 'HEAD'].includes(req.method) && url.pathname !== '/api/test';
+      const mutating = !['GET', 'HEAD'].includes(req.method) && !['/api/test', '/api/brief/chat', '/api/trends/refresh'].includes(url.pathname);
       if (!mutating) return await api(req, res, url);
       if (mutationInFlight) fail('另一个操作正在保存，请稍后重试', 409);
       mutationInFlight = true;
@@ -273,12 +306,16 @@ const server = http.createServer(async (req, res) => {
     res.end(req.method === 'HEAD' ? undefined : content);
   } catch (e) {
     if (res.headersSent) return res.end();
-    send(res, e.code === 'ENOENT' ? 404 : e.status || 400, { error: redact(e.code === 'ENOENT' ? '文件不存在' : e.message) });
+    const retry = Number.isFinite(e.retryAfterMs) ? { retryAfterMs: e.retryAfterMs } : {};
+    send(res, e.code === 'ENOENT' ? 404 : e.status || 400, { error: redact(e.code === 'ENOENT' ? '文件不存在' : e.message), ...retry },
+      retry.retryAfterMs ? { 'Retry-After': String(Math.ceil(retry.retryAfterMs / 1000)) } : {});
   }
 });
 server.requestTimeout = 360000;
 server.on('error', e => {
+  trends.close();
   console.error(e.code === 'EADDRINUSE' ? `端口 ${port} 已被占用，可设置 PORT 更换端口` : `服务启动失败：${e.code}`);
   process.exitCode = 1;
 });
+server.on('close', () => trends.close());
 server.listen(port, '127.0.0.1', () => console.log(`图文创作工作台已启动：http://127.0.0.1:${port}\n模型密钥和作品只保存在本机 data 目录。按 Ctrl+C 停止。`));
