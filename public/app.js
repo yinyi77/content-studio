@@ -1,28 +1,27 @@
+import { IMAGE_STYLES, STYLE_CATEGORIES } from './style-catalog.js';
+
 const app = document.querySelector('#app');
 const toastEl = document.querySelector('#toast');
 const lightbox = document.querySelector('#lightbox');
 const GUIDE_STORAGE_KEY = 'content-studio:briefing:v1';
-const GUIDE_STYLES = [
-  {id:'notion',name:'手绘知识',description:'干净线条、浅色纸感，适合知识分享'},
-  {id:'editorial',name:'杂志编辑',description:'清晰层级与留白，适合观点和产品介绍'},
-  {id:'warm',name:'温暖生活',description:'柔和暖色，适合故事与日常分享'},
-  {id:'bold',name:'醒目海报',description:'强烈对比和大标题，适合宣传与清单'},
-  {id:'blueprint',name:'工程蓝图',description:'技术图解，适合流程和结构说明'},
-  {id:'minimal',name:'极简留白',description:'简约克制，适合品牌与概念表达'},
-];
+const GUIDE_STYLES = IMAGE_STYLES;
+const GUIDE_IMAGE_LIMIT = 4;
+const GUIDE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const state = {
-  view: new URLSearchParams(location.search).get('view') === 'trends' ? 'trends' : 'briefing', config: null, projects: [], project: null, draft: null,
-  selectedPage: null, editorTab: 'outline', dirty: false, busy: '', search: '', filter: 'all',
-  brief: { source: '', mode: 'cards', style: 'notion', aspect: '3:4', count: 5 },
+  view: new URLSearchParams(location.search).get('view') === 'trends' ? 'trends' : 'briefing', config: null, projects: [],
+  busy: '', search: '', filter: 'all',
   models: { text: [], image: [] }, testResults: {}, bootError: '',
-  guide: restoreGuidance(), guideBusy: false, guideEdit: null,
+  guide: restoreGuidance(), guideBusy: false, guideEdit: null, guideProject: null, guideActionBusy: '',
+  guideStyleCategory: 'all', guideStyleSearch: '',
+  guideUploadBusy: false,
   trends: null, trendsError: '', trendsLoading: false, trendsBusy: '',
   trendPlatform: 'all', trendSearch: '', trendScope: 'all', trendLimit: 24, trendKeywordsDraft: '', trendKeywordsDirty: false, trendIntervalDraft: null,
 };
-let pollTimer;
-let pollVersion = 0;
 let toastTimer;
 let guideRequestVersion = 0;
+let guideCreationVersion = 0;
+let guideProjectPollTimer;
+let guideProjectPollVersion = 0;
 let trendsPollTimer;
 let trendsLoadVersion = 0;
 
@@ -51,20 +50,15 @@ const paths = {
 };
 const icon = (name, extra = '') => `<svg class="icon ${extra}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.file}</svg>`;
 const h = (value = '') => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const isActive = p => ['analyzing', 'generating'].includes(p?.status);
-const canEdit = p => p && !isActive(p) && p.pages?.length > 0;
-const hasImageEdits = () => Boolean(state.draft?.pages?.some(page => {
-  const saved = state.project?.pages?.find(item => item.id === page.id);
-  return !saved || ['title','content','prompt'].some(key => page[key] !== saved[key]);
-}));
+const isActive = p => ['analyzing', 'generating'].includes(p?.status)||['thinking','analyzing','generating'].includes(p?.chatStatus);
 const statusText = status => ({analyzing:'分析内容中', draft:'方案待确认', generating:'图片生成中', completed:'已完成', partial:'部分完成', error:'任务失败', interrupted:'任务已中断'}[status] || '待处理');
 const modeText = mode => ({cards:'多页图文', infographic:'信息图', cover:'封面海报'}[mode] || mode);
 const time = date => date ? new Date(date).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
 const buttonBusy = name => state.busy === name ? '<span class="spinner spinner-small"></span>' : '';
 
 function blankGuidance() {
-  return {messages:[],analysis:'',source:'',input:'',error:'',pending:false,
-    matchTrends:true,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',
+  return {messages:[],analysis:'',source:'',input:'',error:'',pending:false,clarificationAsked:false,decision:null,
+    matchTrends:true,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
     preferences:{style:null,aspect:null,count:null,mode:null},
     recommendations:{style:'notion',aspect:'3:4',count:5,mode:'cards'},reasons:{}};
 }
@@ -83,7 +77,12 @@ function restoreGuidance() {
   try {
     const data=JSON.parse(sessionStorage.getItem(GUIDE_STORAGE_KEY)||'null');
     if(!data||!Array.isArray(data.messages))return base;
-    base.messages=trimGuideMessages(data.messages.filter(m=>['user','assistant'].includes(m?.role)&&typeof m.content==='string'&&m.content.length<=24000));
+    base.messages=trimGuideMessages(data.messages.filter(m=>['user','assistant'].includes(m?.role)&&typeof m.content==='string'&&m.content.length<=24000).map(m=>({role:m.role,content:m.content,images:normalizeGuideImages(m.images),...(m.role==='assistant'&&m.kind==='clarification'?{kind:'clarification'}:{})})));
+    base.draftImages=normalizeGuideImages(data.draftImages);
+    base.referenceImages=normalizeGuideImages(data.referenceImages);
+    if(typeof data.attachmentError==='string')base.attachmentError=data.attachmentError.slice(0,600);
+    base.clarificationAsked=data.clarificationAsked===true;
+    base.decision=normalizeGuideDecision(data.decision);
     base.preferences=guidePreferences(data.preferences);
     const rec=guidePreferences(data.recommendations);
     for(const key of Object.keys(rec))if(rec[key]!==null)base.recommendations[key]=rec[key];
@@ -98,12 +97,73 @@ function restoreGuidance() {
     }
     if(!base.trendNotice&&typeof data.trendNotice==='string')base.trendNotice=data.trendNotice.slice(0,500);
     if(typeof data.studioSource==='string')base.studioSource=data.studioSource.slice(0,24000);
-    if(data.pending)base.error='上次分析未完成。你可以点击重试继续，不会自动重复请求模型。';
+    if(data.creation&&typeof data.creation==='object'&&isGuideUuid(data.creation.requestId)){
+      const c=data.creation;base.creation={requestId:c.requestId,projectId:isGuideUuid(c.projectId)?c.projectId:null,status:typeof c.status==='string'?c.status.slice(0,40):'unknown',error:typeof c.error==='string'?c.error.slice(0,1000):'',requestedAt:typeof c.requestedAt==='string'?c.requestedAt:null};
+      if(c.lastChatRequest&&isGuideUuid(c.lastChatRequest.requestId)&&typeof c.lastChatRequest.message==='string'&&c.lastChatRequest.message.length<=6000)base.creation.lastChatRequest={requestId:c.lastChatRequest.requestId,message:c.lastChatRequest.message,images:normalizeGuideImages(c.lastChatRequest.images),status:typeof c.lastChatRequest.status==='string'?c.lastChatRequest.status.slice(0,40):'unknown',restoredInput:c.lastChatRequest.restoredInput===true};
+    }
+    if(typeof data.creationError==='string')base.creationError=data.creationError.slice(0,1000);
+    if(data.pending&&!base.creation)base.error='上次分析未完成。你可以点击重试继续，不会自动重复请求模型。';
   }catch{/* A blocked or full session store should not prevent creation. */}
   return base;
 }
+function isGuideUuid(value){return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);}
+function normalizeGuideImages(value) {
+  const seen=new Set();
+  return (Array.isArray(value)?value:[]).slice(0,GUIDE_IMAGE_LIMIT).flatMap(image=>{
+    if(!image||!isGuideUuid(image.id)||seen.has(image.id.toLowerCase()))return [];
+    const id=image.id.toLowerCase();seen.add(id);
+    return [{id,name:typeof image.name==='string'?image.name.slice(0,200):'产品参考图',mime:['image/png','image/jpeg','image/webp'].includes(image.mime)?image.mime:'image/png',size:Number.isInteger(image.size)&&image.size>=0?image.size:0,url:`/reference-images/${id}`,...(typeof image.sha256==='string'&&/^[a-f0-9]{64}$/.test(image.sha256)?{sha256:image.sha256}:{})}];
+  });
+}
+function mergeGuideImages(...lists) {
+  const unique=new Map();
+  for(const list of lists)for(const image of normalizeGuideImages(list))if(!unique.has(image.id))unique.set(image.id,image);
+  return [...unique.values()];
+}
+function guideImageMessageView(images) {
+  const list=normalizeGuideImages(images);
+  return list.length?`<div class="guide-message-images" aria-label="这条消息的产品参考图">${list.map(image=>`<button type="button" data-action="guide-reference-preview" data-id="${h(image.id)}" aria-label="查看参考图：${h(image.name)}"><img src="${h(image.url)}" alt="${h(image.name)}" loading="lazy"></button>`).join('')}</div>`:'';
+}
+function guideDraftImagesView() {
+  const g=state.guide,images=normalizeGuideImages(g.draftImages);
+  if(!images.length&&!state.guideUploadBusy&&!g.attachmentError)return '';
+  return `<div class="guide-composer-attachments" aria-label="待发送的产品图片">${images.length?`<div class="guide-draft-images">${images.map(image=>`<div class="guide-draft-image"><button type="button" class="guide-draft-preview" data-action="guide-reference-preview" data-id="${h(image.id)}" aria-label="查看待发送图片：${h(image.name)}"><img src="${h(image.url)}" alt="${h(image.name)}"></button><button type="button" class="guide-draft-remove" data-action="guide-image-remove" data-id="${h(image.id)}" aria-label="移除图片：${h(image.name)}" ${state.guideUploadBusy?'disabled':''}>${icon('close')}</button></div>`).join('')}</div>`:''}${state.guideUploadBusy?'<div class="guide-upload-status" role="status"><span class="spinner spinner-small"></span>正在放入图片…</div>':images.length?`<span class="guide-attachment-note">${images.length} 张图片 · 随这条消息发送</span>`:''}${g.attachmentError?`<p class="guide-attachment-error" role="alert">${h(g.attachmentError)}</p>`:''}</div>`;
+}
+function referenceFileData(file) {
+  return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('这张图片暂时无法读取，请重新粘贴或选择。'));reader.readAsDataURL(file);});
+}
+async function addGuideImages(files) {
+  const g=state.guide;
+  if(state.guideUploadBusy||state.guideBusy||guideWorkActive())return notify('当前消息正在处理中，完成后再添加图片。');
+  const list=Array.from(files||[]);if(!list.length)return;
+  g.attachmentError='';
+  const current=g.creation?g.draftImages:mergeGuideImages(g.referenceImages,g.draftImages);
+  const room=GUIDE_IMAGE_LIMIT-current.length;
+  const validation=list.length>room?`这次创作最多使用 ${GUIDE_IMAGE_LIMIT} 张产品图片，当前还可以添加 ${Math.max(0,room)} 张。`:list.some(file=>!['image/png','image/jpeg','image/webp'].includes(file.type))?'请使用 PNG、JPEG 或 WebP 图片。':list.some(file=>file.size>GUIDE_IMAGE_MAX_BYTES)?'单张图片请控制在 8 MB 以内。':list.some(file=>!file.size)?'图片文件是空的，请换一张再试。':'';
+  if(validation){g.attachmentError=validation;saveGuidance();renderGuidance({preserve:true});return;}
+  const version=guideCreationVersion;state.guideUploadBusy=true;saveGuidance();renderGuidance({preserve:true});
+  try {
+    for(const file of list){
+      const dataUrl=await referenceFileData(file);
+      const {image}=await api('/api/reference-images',{method:'POST',body:{name:file.name||'粘贴的产品图片',dataUrl}});
+      if(state.guide!==g||version!==guideCreationVersion)return;
+      const saved=normalizeGuideImages([image]);if(!saved.length)throw new Error('图片保存结果无效，请重新添加。');
+      g.draftImages=mergeGuideImages(g.draftImages,saved);saveGuidance();renderGuidance({preserve:true});
+    }
+  }catch(error){if(state.guide===g&&version===guideCreationVersion){g.attachmentError=`${error.message} 已添加的图片和文字会保留。`;saveGuidance();}}
+  finally{state.guideUploadBusy=false;if(state.guide===g&&version===guideCreationVersion){saveGuidance();renderGuidance({preserve:true});document.querySelector('#guide-input')?.focus({preventScroll:true});}}
+}
+function guideComposerView({creating,locked,p,hint}) {
+  const g=state.guide,busy=state.guideUploadBusy||state.guideBusy;
+  const sendDisabled=busy||locked||(!creating&&!guideTextReady())||(creating&&!p);
+  const placeholder=creating?'直接说想怎么改，也可以粘贴或拖入新的产品图…':g.decision?.action==='ask'?'把问题一起回答就好，产品图也可以直接粘贴进来…':'说说想创作什么，也可以直接粘贴或拖入产品图片…';
+  return `<form id="guide-form" class="guide-composer ${g.draftImages.length?'has-attachments':''}" aria-label="文字和图片消息输入框"><label class="sr-label" for="guide-input">${creating?'直接告诉我还想怎么改':'告诉创意编辑你想创作什么'}</label><input id="guide-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden ${busy||locked?'disabled':''}><button type="button" class="guide-attach-button" data-action="guide-image-add" aria-label="在消息中添加产品图片" title="可直接粘贴或拖入图片" ${busy||locked?'disabled':''}>${icon('image')}</button><div class="guide-composer-content">${guideDraftImagesView()}<textarea id="guide-input" maxlength="${creating?6000:24000}" rows="2" placeholder="${placeholder}" ${state.guideBusy?'disabled':''}>${h(g.input)}</textarea></div><div class="guide-composer-footer"><div class="guide-composer-options">${!creating?`<label class="guide-trends-toggle"><input id="guide-match-trends" type="checkbox" ${g.matchTrends?'checked':''} ${state.guideBusy?'disabled':''}><span>匹配相关热点</span></label>`:''}<span>${state.guideUploadBusy?'图片正在保存到本机，完成后可发送。':hint}</span></div><button class="button button-primary" type="submit" ${sendDisabled?'disabled':''}>${state.guideUploadBusy?'<span class="spinner spinner-small"></span>添加中':state.guideBusy?'<span class="spinner spinner-small"></span>分析中':locked?'<span class="spinner spinner-small"></span>处理中':creating?'发送修改':g.decision?.action==='ask'?'回答并创作':'发送想法'} ${icon('arrow')}</button></div></form>`;
+}
 function saveGuidance() {try{sessionStorage.setItem(GUIDE_STORAGE_KEY,JSON.stringify(state.guide));}catch{}}
-const guideStyles = () => state.config?.styles?.length?state.config.styles:GUIDE_STYLES;
+const guideStyles = () => (state.config?.styles?.length?state.config.styles:GUIDE_STYLES).map(style=>{
+  const fallback=GUIDE_STYLES.find(item=>item.id===style.id)||{};
+  return {...fallback,...style,category:style.category||fallback.category||STYLE_CATEGORIES[0],aliases:Array.isArray(style.aliases)?style.aliases:fallback.aliases||[]};
+});
 const guideTextReady = () => Boolean(state.config?.text?.hasKey&&state.config.text.baseUrl&&state.config.text.model);
 const guideFieldLabel = field => ({style:'视觉风格',aspect:'画面比例',count:'图片张数'}[field]);
 function guideValueLabel(field,value) {
@@ -111,21 +171,149 @@ function guideValueLabel(field,value) {
   if(field==='aspect')return ({'3:4':'3:4 · 竖版','1:1':'1:1 · 方形','16:9':'16:9 · 横版'}[value])||value;
   return `${value} 张`;
 }
-function currentGuideField() {
-  if(state.guideEdit)return state.guideEdit;
-  return ['style','aspect','count'].find(field=>state.guide.preferences[field]===null)||null;
+function normalizeGuideDecision(value) {
+  if(!value||!['ask','generate','hold'].includes(value.action))return null;
+  if(!value.resolvedSpec||typeof value.resolvedSpec!=='object')return null;
+  const spec=guidePreferences(value.resolvedSpec);
+  if(Object.values(spec).some(v=>v===null))return null;
+  const questions=Array.isArray(value.questions)?value.questions:[];
+  if(questions.length>4||questions.some(q=>!q||typeof q.id!=='string'||typeof q.question!=='string'||!q.question.trim()||q.question.length>800))return null;
+  if((value.action==='ask'&&!questions.length)||(value.action!=='ask'&&questions.length))return null;
+  return {action:value.action,questions,resolvedSpec:spec,summary:typeof value.summary==='string'?value.summary.slice(0,2000):''};
 }
 function guidanceReady() {
-  return Boolean(state.guide.source.trim()&&state.guide.analysis&&['style','aspect','count'].every(f=>state.guide.preferences[f]!==null));
+  return Boolean(state.guide.source.trim()&&state.guide.analysis&&state.guide.decision?.action==='generate'&&['style','aspect','count','mode'].every(f=>state.guide.preferences[f]!==null));
 }
 function guideQuestion(field) {
   return {style:'你想要怎样的视觉风格？',aspect:'准备用什么画面比例？',count:'这次想做几张图片？'}[field];
 }
 function guidanceView() {
-  const g=state.guide, ready=guidanceReady(), field=currentGuideField();
+  const g=state.guide,p=state.guideProject,creating=Boolean(g.creation),locked=guideWorkActive();
   const examples=['给新手做一组养猫准备清单','把产品介绍做成一组宣传图','做一张 AI 工作流知识图'];
-  const thread=g.messages.length?`${g.messages.map(m=>`<article class="guide-message ${m.role==='user'?'user':'assistant'}"><span class="guide-message-label">${m.role==='user'?'你':'创意编辑'}</span><p>${h(m.content)}</p></article>`).join('')}${g.analysis?`<div class="guide-analysis"><span>我的内容分析</span><p>${h(g.analysis)}</p></div>`:''}`:`<div class="guide-welcome"><span class="eyebrow">LET'S FIND YOUR DIRECTION</span><h2>你想做点什么？</h2><p>一个主题、一段素材，甚至一个还没想完整的念头都可以。<br>我会先帮你分析，再一起确定画面的样子。</p><div class="guide-examples">${examples.map((example,i)=>`<button data-action="guide-example" data-example="${i}">${h(example)} <span>↗</span></button>`).join('')}</div></div>`;
-  return `<div class="briefing-layout"><section class="briefing-panel" aria-label="创作需求对话"><div class="briefing-panel-heading"><span class="guide-avatar" aria-hidden="true">${icon('file')}</span><div><h2>创意编辑</h2><p>先聊清楚，再开始创作。</p></div><span class="guide-session-label">01 / DISCOVER</span></div><div class="guide-thread" role="log" aria-live="polite">${thread}${state.guideBusy?`<div class="guide-thinking"><span class="spinner spinner-small"></span>正在理解你的想法，整理内容方向…</div>`:''}${g.error?`<div class="guide-error" role="alert"><p>${h(g.error)}</p>${g.messages.some(m=>m.role==='user')?`<button class="text-button" data-action="guide-retry" ${state.guideBusy?'disabled':''}>重试这次分析</button>`:''}</div>`:''}${g.analysis&&!state.guideBusy&&!g.error?guideTrendMatchesView():''}${g.analysis&&!state.guideBusy&&!g.error?(field?guideQuestionView(field):`<div class="guide-ready">${icon('check')}创作方向已经明确，确认后就可以进入创作台。</div>`):''}</div><form id="guide-form" class="guide-composer"><label class="sr-label" for="guide-input">告诉创意编辑你想创作什么</label><textarea id="guide-input" maxlength="24000" rows="3" placeholder="${g.messages.length?'可以继续补充：面向职场新人、暖色、竖版、5 张…':'例如：我想做一组面向职场新人的 AI 提效指南…'}" ${state.guideBusy?'disabled':''}>${h(g.input)}</textarea><label class="guide-trends-toggle"><input id="guide-match-trends" type="checkbox" ${g.matchTrends?'checked':''} ${state.guideBusy?'disabled':''}><span>帮我匹配相关热点<small>分析时一起找，自主选择是否结合</small></span></label><div class="guide-composer-footer"><span>${g.messages.length?'按你的想法补充或修改，也可以点选上方选项。':'只需要说想做什么，暂时不用填其他参数。'}</span><button class="button button-primary" type="submit" ${state.guideBusy||!guideTextReady()?'disabled':''}>${state.guideBusy?'<span class="spinner spinner-small"></span>分析中':g.messages.length?'发送补充':'开始聊聊'} ${icon('arrow')}</button></div></form><div class="guide-model-note">${guideTextReady()?'分析使用你的文字模型；点选快捷选项不会额外调用模型。':`先连接文字模型即可开始分析。<button class="text-button" data-action="navigate" data-view="settings">去模型设置 ↗</button>`}</div></section><aside class="guide-summary panel"><span class="section-index">YOUR CREATIVE BRIEF</span><h2>这次的创作方向</h2><p>每确定一点，想法就更清楚一点。</p><div class="guide-summary-topic"><strong>内容主题</strong><p>${g.source?h(g.source.slice(0,360))+(g.source.length>360?'…':''):'等待你写下第一个想法。'}</p></div>${g.selectedTrend?`<div class="guide-summary-trend"><span>已选热点</span><strong>${h(g.selectedTrend.title)}</strong><small>${h(trendName(g.selectedTrend.platform))}${g.selectedTrend.kind==='meme'?` · 热梗候选，至 ${guideTrendDate(g.selectedTrend.expiresAt)} 有效`:''} · ${h(g.selectedTrend.angle)}</small><button class="text-button" data-action="guide-trend-clear" ${state.guideBusy?'disabled':''}>移除热点</button></div>`:''}<div class="guide-summary-list">${['style','aspect','count'].map(f=>`<div class="guide-summary-item"><div><span>${guideFieldLabel(f)}</span><strong>${g.preferences[f]!==null?h(guideValueLabel(f,g.preferences[f])):'待确认'}</strong>${g.analysis&&g.preferences[f]===null?`<small>建议：${h(guideValueLabel(f,g.recommendations[f]))}</small>`:''}</div>${g.analysis&&g.preferences[f]!==null&&!(f==='count'&&g.preferences.mode&&g.preferences.mode!=='cards')?`<button class="text-button" data-action="guide-edit" data-field="${f}" ${state.guideBusy||g.error?'disabled':''}>调整</button>`:''}</div>`).join('')}</div><div class="guide-progress"><span>${['style','aspect','count'].filter(f=>g.preferences[f]!==null).length} / 3 项已确认</span><div class="guide-progress-dots">${['style','aspect','count'].map(f=>`<i class="${g.preferences[f]!==null?'done':''}"></i>`).join('')}</div></div>${g.analysis&&!ready&&!g.error?`<button class="button button-secondary button-full" data-action="guide-accept" ${state.guideBusy?'disabled':''}>未选项采用建议</button>`:''}<button class="guide-handoff button button-primary button-full" data-action="guide-handoff" ${!ready||state.guideBusy||g.error?'disabled':''}>确认，进入创作台 ${icon('arrow')}</button><p class="guide-privacy">确认后会自动填好参数，进入创作台后仍可修改。图片由你点击生成。</p><button class="guide-reset text-button" data-action="guide-reset" ${state.guideBusy?'disabled':''}>${icon('refresh')}重新聊一个想法</button></aside></div>`;
+  const thread=g.messages.length?g.messages.map(m=>`<article class="guide-message ${m.role==='user'?'user':'assistant'} ${m.kind==='clarification'?'is-clarification':''}"><span class="guide-message-label">${m.role==='user'?'你':'创意编辑'}</span>${m.kind==='clarification'?`<span class="guide-batch-label">${icon('spark')}一起补充，一次说完</span>`:''}${guideImageMessageView(m.images)}<p>${h(m.content)}</p></article>`).join(''):creating?'<article class="guide-message assistant"><span class="guide-message-label">创意编辑</span>${guideImageMessageView(g.referenceImages)}<p>已载入这份作品。查看图文，或直接告诉我想怎么改。</p></article>':`<div class="guide-welcome"><span class="eyebrow">从一个想法，到一整组内容</span><h2>今天，想创作点什么？</h2><p>先说你的想法，需要补充的我会一次问清。<br>你回答后，我来完成文案和全部图片。</p><div class="guide-flow" aria-label="创作流程"><span>说个想法</span><i>→</i><span>一次补充</span><i>→</i><span>完整图文</span></div><div class="guide-examples">${examples.map((example,i)=>`<button data-action="guide-example" data-example="${i}">${h(example)} ${icon('arrow')}</button>`).join('')}</div></div>`;
+  const preferenceIcons={style:'image',aspect:'expand',count:'cards'};
+  const preferences=(g.analysis||creating)?`<div class="guide-inline-brief" aria-label="创作参数">${['style','aspect','count'].map(f=>{
+    const value=g.preferences[f]??g.recommendations[f];
+    return `<span class="guide-preference">${icon(preferenceIcons[f])}<span class="sr-label">${guideFieldLabel(f)}：</span><strong>${h(guideValueLabel(f,value))}</strong>${!creating&&g.preferences[f]===null?'<span>建议</span>':''}</span>`;
+  }).join('')}</div>`:'';
+  const trend=g.selectedTrend?`<details class="guide-context-trend"><summary><span>已选热点</span><strong>${h(g.selectedTrend.title)}</strong><span>${h(trendName(g.selectedTrend.platform))}</span></summary><p>${h(g.selectedTrend.angle)}</p>${g.selectedTrend.kind==='meme'?`<small>热梗候选 · 至 ${guideTrendDate(g.selectedTrend.expiresAt)} 有效</small>`:''}${!creating?`<button type="button" class="text-button" data-action="guide-trend-clear" ${state.guideBusy?'disabled':''}>移除热点</button>`:''}</details>`:'';
+  const tools=!creating&&g.analysis&&!g.error?`<details class="guide-optional-tools" ${state.guideEdit?'open':''}><summary>查看创作方向与偏好 <span>可选，直接聊天也可以</span></summary><div class="guide-analysis"><span>内容方向</span><p>${h(g.analysis)}</p></div>${preferences}<div class="guide-optional-actions">${['style','aspect','count'].map(f=>`<button type="button" class="text-button" data-action="guide-edit" data-field="${f}" ${state.guideBusy?'disabled':''}>调整${guideFieldLabel(f)}</button>`).join('')}</div>${state.guideEdit?guideQuestionView(state.guideEdit):''}${guideTrendMatchesView()}</details>`:'';
+  const hint=locked?'任务正在处理中，可以先写好下一条要求。':creating?'直接说想改哪里，或按 ⌘ / Ctrl + Enter 发送。':g.decision?.action==='ask'?'把上面的问题一起回复，拿不准的偏好可以交给我。':'信息齐全后会自动生成；暂不生成时直接告诉我。';
+  return `<div class="briefing-layout conversation-layout ${creating?'has-creation':''}"><section class="briefing-panel" aria-label="创作需求对话"><div class="guide-thread" role="log" aria-live="polite">${thread}${state.guideBusy?'<div class="guide-thinking"><span class="spinner spinner-small"></span>正在理解你的想法，检查还需要哪些信息…</div>':''}${g.error?`<div class="guide-error" role="alert"><p>${h(g.error)}</p>${!creating&&g.messages.some(m=>m.role==='user')?`<button class="text-button" data-action="guide-retry" ${state.guideBusy?'disabled':''}>重试这次分析</button>`:''}</div>`:''}${creating?preferences:''}${trend}${tools}${guideCreationView()}</div>${guideComposerView({creating,locked,p,hint})}<div class="guide-model-note">${creating?'修改通过文字模型理解；需要重画时才调用图片模型，可能产生费用。':guideTextReady()?'发送后会分析需求，信息齐全时自动调用文字与图片模型。':'先连接文字模型即可开始。'}${!guideTextReady()?` <button class="text-button" data-action="navigate" data-view="settings">去模型设置 ${icon('arrow')}</button>`:''}</div></section></div>`;
+}
+
+function guideProjectActive(project) {
+  return Boolean(project&&(isActive(project)||['thinking','analyzing','generating'].includes(project.chatStatus)));
+}
+function guideWorkActive() {const c=state.guide.creation;return Boolean(state.guideUploadBusy||state.guideActionBusy||guideProjectActive(state.guideProject)||(!state.guideProject&&c&&!c.error&&['analyzing','generating'].includes(c.status)));}
+function guideCreationStatus(project) {
+  if(project.chatStatus==='thinking')return '正在理解修改要求';
+  if(project.chatStatus==='analyzing')return project.chatAction==='create'?'正在策划图文':'正在修改内容';
+  if(project.chatStatus==='generating'||project.status==='generating')return '正在生成图片';
+  if(project.status==='analyzing')return '正在策划图文';
+  if(project.chatStatus==='error')return '这次修改未完成';
+  if(project.chatStatus==='interrupted')return '这次修改已中断';
+  return ({completed:'图文已完成',partial:'部分图片未完成',error:'这次创作未完成',interrupted:'创作已中断',draft:'内容已准备好'}[project.status])||'作品准备中';
+}
+function guideCreationView() {
+  const g=state.guide,c=g.creation;
+  if(!c)return g.creationError?`<div class="guide-creation-error guide-error" role="alert"><p>${h(g.creationError)}</p><button class="text-button" data-action="navigate" data-view="settings">检查模型设置 ${icon('arrow')}</button></div>`:'';
+  const p=state.guideProject?.id===c.projectId?state.guideProject:null;
+  if(!p)return `<section class="guide-creation" aria-label="创作结果"><div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${c.projectId?'正在恢复你的作品':'正在确认创作请求'}</h3></div>${state.guideActionBusy?'<span class="spinner spinner-small"></span>':''}</div><p class="guide-creation-pending">${c.projectId?'正在读取已保存的结果，不会重复生成。':'提交后会在这里自动完成内容策划与图片生成。刷新页面不会自动再发一次生成请求。'}</p>${c.error?`<div class="guide-creation-error" role="alert">${h(c.error)}</div>`:''}<div class="guide-creation-actions"><button class="button button-secondary" data-action="${c.projectId?'guide-load-result':'guide-create-retry'}" ${state.guideActionBusy?'disabled':''}>${icon('refresh')}${c.projectId?'重新读取结果':'确认上次请求结果'}</button></div></section>`;
+  const pages=p.pages||[],done=pages.filter(page=>page.status==='done').length,active=guideProjectActive(p)||Boolean(state.guideActionBusy);
+  const canRetry=!active&&(pages.some(page=>page.status!=='done')||(!pages.length&&['error','interrupted'].includes(p.status)));
+  const last=c.lastChatRequest;
+  const chat=(p.chatMessages||[]).filter(message=>!(message.role==='user'&&(message.action==='create'||message.content===p.source))).slice(-20);
+  const pending=last&&['sending','unknown'].includes(last.status)&&!chat.some(message=>message.requestId===last.requestId);
+  const issue=['error','interrupted'].includes(p.chatStatus)||['error','partial','interrupted'].includes(p.status);
+  const status=active||issue||!done||done!==pages.length?guideCreationStatus(p):`${done} 张已完成`;
+  const progress=active||canRetry?`<div class="guide-creation-progress"><strong>${done} / ${pages.length||g.preferences.count||0} 张已完成</strong><span>${active?h(p.logs?.at(-1)?.message||'正在处理，完成后会自动展示。'):pages.length?'已完成的图片会保留，可继续重试其余图片。':'这次尚未生成图片，可以重新开始内容策划。'}</span></div>`:'';
+  const downloads=done&&!active?`<a class="button button-primary" href="/api/projects/${encodeURIComponent(p.id)}/export.zip" download>${icon('download')}下载整组</a>`:'';
+  const retryActions=`${canRetry?`<button class="button button-secondary" data-action="guide-retry-images">${icon('refresh')}${pages.length?'重试未完成图片':'重试这次创作'}</button>`:''}${c.error&&!active?'<button class="text-button" data-action="guide-load-result">重新读取结果</button>':''}${last&&last.status==='unknown'&&!active?'<button class="text-button" data-action="guide-chat-retry">确认上次修改结果</button>':''}`;
+  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}"><div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${h(p.title||'这次的图文作品')}</h3></div><span class="guide-creation-status ${issue?'is-warning':''}">${active?'<span class="spinner spinner-small"></span>':icon(issue?'alert':'check')}${h(status)}</span></div>${progress}${p.error||c.error?`<div class="guide-creation-error" role="alert">${h(c.error||p.error)}</div>`:''}${pages.length?`<div class="guide-creation-grid" data-count="${pages.length}">${pages.map((page,index)=>`<article class="guide-created-page"><div class="guide-created-image" data-aspect="${h(p.aspect)}">${page.imageUrl?`<button data-action="guide-result-preview" data-id="${h(page.id)}" aria-label="查看第 ${index+1} 张完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title||'第 '+(index+1)+' 张图文')}" loading="lazy"><span>${icon('expand')}查看大图</span></button>`:`<div class="guide-created-placeholder">${page.status==='generating'?'<span class="spinner"></span>':icon('image')}<strong>第 ${index+1} 张</strong><span>${page.status==='error'?'这张图片暂未完成':page.status==='generating'?'正在绘制…':'等待生成'}</span></div>`}</div><div class="guide-created-page-footer"><span>${String(index+1).padStart(2,'0')} · ${h(page.title)}</span>${page.imageUrl?`<a href="${h(page.imageUrl)}" download="${h(p.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}" aria-label="下载第 ${index+1} 张图片">${icon('download')}</a>`:''}</div>${page.error?`<p class="guide-created-error">${h(page.error)}</p>`:''}</article>`).join('')}</div>`:''}${p.caption||p.title?`<section class="guide-creation-copy" aria-label="帖子正文"><div class="guide-post-caption"><h4 class="sr-label">帖子正文</h4><p>${h(p.caption||'')}</p></div><div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}</div></section>`:downloads?`<div class="guide-creation-actions">${downloads}</div>`:''}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p></article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
+}
+
+function setGuideProject(project) {
+  const c=state.guide.creation;if(!c||!project?.id||(c.projectId&&project.id!==c.projectId))return;
+  c.projectId=project.id;c.status=project.status;c.error='';state.guideProject=project;
+  state.guide.referenceImages=normalizeGuideImages(project.referenceImages);
+  const last=c.lastChatRequest;
+  if(last){const request=project.chatRequests?.find(item=>item.requestId===last.requestId||item.id===last.requestId);if(request)last.status=request.status;else if(project.chatMessages?.some(message=>message.requestId===last.requestId))last.status=guideProjectActive(project)?'running':'completed';if(last.restoredInput&&['running','completed'].includes(last.status)){if(state.guide.input===last.message)state.guide.input='';const sent=new Set(normalizeGuideImages(last.images).map(image=>image.id));state.guide.draftImages=state.guide.draftImages.filter(image=>!sent.has(image.id));last.restoredInput=false;}}
+  const index=state.projects.findIndex(item=>item.id===project.id);if(index<0)state.projects.unshift(project);else state.projects[index]=project;
+  saveGuidance();
+}
+async function loadGuideProject({quiet=false}={}) {
+  const c=state.guide.creation;if(!c?.projectId)return;
+  const version=guideCreationVersion,id=c.projectId;
+  try{const {project}=await api(`/api/projects/${encodeURIComponent(id)}`);if(version!==guideCreationVersion||state.guide.creation?.projectId!==id)return;setGuideProject(project);}
+  catch(error){if(version!==guideCreationVersion)return;c.error=error.status===404?'这份作品记录已不存在。不会自动重建或调用模型，请检查作品记录或开启新创作。':error.message;if(error.status===404)state.guideProject=null;saveGuidance();}
+  if(version===guideCreationVersion){renderGuidance({preserve:true});if(guideProjectActive(state.guideProject))beginGuidePolling();}
+}
+function beginGuidePolling() {
+  clearTimeout(guideProjectPollTimer);const version=++guideProjectPollVersion;
+  const run=async()=>{
+    const c=state.guide.creation;if(version!==guideProjectPollVersion||!c?.projectId)return;
+    const id=c.projectId,previous=state.guideProject;
+    try{const {project}=await api(`/api/projects/${encodeURIComponent(id)}`);if(version!==guideProjectPollVersion||state.guide.creation?.projectId!==id)return;setGuideProject(project);renderGuidance({preserve:true});if(guideProjectActive(previous)&&!guideProjectActive(project))notify(project.status==='completed'?'图文已完成，可以直接在对话里查看和修改。':project.error||'这次处理已结束，结果已保存在对话中。',['error','partial','interrupted'].includes(project.status)||['error','interrupted'].includes(project.chatStatus));}
+    catch(error){if(version!==guideProjectPollVersion)return;c.error=error.message;if(error.status===404)state.guideProject=null;saveGuidance();renderGuidance({preserve:true});}
+    if(version===guideProjectPollVersion&&guideProjectActive(state.guideProject))guideProjectPollTimer=setTimeout(run,1800);
+  };
+  if(guideProjectActive(state.guideProject))guideProjectPollTimer=setTimeout(run,1200);
+}
+async function startGuideCreation({command='',retryRequest=false}={}) {
+  const g=state.guide;if(state.guideBusy||state.guideActionBusy||guideProjectActive(state.guideProject))return;
+  if(g.creation?.projectId)return loadGuideProject();
+  if(g.creation)return recoverGuideCreation();
+  if(!guidanceReady()||g.error)return notify('先把创作需求补充清楚，我会自动安排风格、比例和张数。',true);
+  if((g.draftImages.length||g.input.trim()&&g.input.trim()!==command.trim())&&!retryRequest)return notify('还有未发送的补充，请先发送再生成。',true);
+  if(g.selectedTrend&&!guideTrendUsable(g.selectedTrend)){g.selectedTrend=null;g.trendNotice='已选热梗已过 14 天留存期，已移除。请重新选择，或按原主题生成。';saveGuidance();renderGuidance();return notify(g.trendNotice,true);}
+  if(!state.config?.configured){g.creationError='需求已整理好。请在模型设置中配置文字和图片模型，回来后告诉我“继续创作”即可。';saveGuidance();renderGuidance();return;}
+  const source=guideSourceWithTrend(g);if(source.length>24000)return notify('完整素材加上热点信息超过 24000 字，请精简素材后再生成。原素材会保留。',true);
+  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString()};
+  if(command&&!retryRequest){g.messages.push({role:'user',content:command});g.messages=trimGuideMessages(g.messages);g.input='';}
+  g.creation=c;g.creationError='';c.error='';state.guideActionBusy='create';const version=++guideCreationVersion;saveGuidance();renderGuidance({focusCreation:true});
+  try{const {project}=await api('/api/brief/create',{method:'POST',body:{requestId:c.requestId,source,style:g.preferences.style,aspect:g.preferences.aspect,count:g.preferences.count,mode:g.preferences.mode||'cards',referenceIds:g.referenceImages.map(image=>image.id)}});if(version!==guideCreationVersion||state.guide!==g)return;setGuideProject(project);}
+  catch(error){if(version!==guideCreationVersion)return;if(error.status&&error.status>=400&&error.status<500){g.creation=null;g.creationError=error.message;if(command&&!g.input)g.input=command;}else{c.status='unknown';c.error=`${error.message} 上次请求结果尚未确认，可以使用同一请求编号确认结果，不会重复创建。`;}saveGuidance();}
+  finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({focusCreation:true});beginGuidePolling();}}
+}
+async function recoverGuideCreation() {
+  const c=state.guide.creation;if(!c||state.guideActionBusy)return;
+  if(c.projectId)return loadGuideProject();
+  const version=guideCreationVersion;state.guideActionBusy='recover';renderGuidance({preserve:true});
+  try{const {projects}=await api('/api/projects');if(version!==guideCreationVersion)return;state.projects=projects;const project=projects.find(project=>project.creationRequestId===c.requestId);if(project)setGuideProject(project);else{c.error='作品记录中还未找到上次请求。可以稍后再查询；开启新创作会使用新的生成请求。此次查询没有调用模型。';saveGuidance();}}
+  catch(error){if(version===guideCreationVersion){c.error=error.message;saveGuidance();}}
+  finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({focusCreation:true});beginGuidePolling();}}
+}
+
+async function sendGuideProjectMessage({message='',retry=false}={}) {
+  const g=state.guide,c=g.creation,p=state.guideProject;
+  if(!c?.projectId||!p)return notify('先读取这次的作品结果，再发送修改要求。',true);
+  if(guideWorkActive()||state.guideBusy)return notify('当前任务正在处理中，完成后再发送修改。');
+  if(!retry&&c.lastChatRequest?.status==='unknown'){await loadGuideProject({quiet:true});if(c.lastChatRequest.status==='unknown')return notify('上一条修改的结果尚未确认，请先点击“确认上次修改结果”。当前输入会保留。',true);}
+  const previous=retry?c.lastChatRequest:null;
+  const images=normalizeGuideImages(previous?.images||(!message&&!retry?g.draftImages:[]));
+  const text=(previous?.message||message||g.input||(images.length?'请参考这些产品图片，帮我看看这份作品可以怎么调整。':'')).trim();if(!text)return notify('告诉我想怎么修改这份作品。');if(text.length>6000)return notify('修改要求请控制在 6000 字以内。',true);
+  const request=previous||{requestId:crypto.randomUUID(),message:text,images,status:'sending'};request.status='sending';c.lastChatRequest=request;c.error='';
+  if(!message&&!retry){g.input='';g.draftImages=[];g.attachmentError='';}
+  state.guideActionBusy='chat';const version=guideCreationVersion;saveGuidance();renderGuidance({preserve:true});
+  try{const {project}=await api(`/api/projects/${encodeURIComponent(c.projectId)}/chat`,{method:'POST',body:{message:request.message,requestId:request.requestId,...(images.length?{referenceIds:images.map(image=>image.id)}:{})}});if(version!==guideCreationVersion||state.guide!==g)return;request.status='running';setGuideProject(project);}
+  catch(error){if(version!==guideCreationVersion)return;request.status=error.status&&error.status>=400&&error.status<500?'error':'unknown';c.error=error.message;if(!g.input&&!message){g.input=text;g.draftImages=mergeGuideImages(images,g.draftImages).slice(0,GUIDE_IMAGE_LIMIT);request.restoredInput=true;}saveGuidance();}
+  finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();if(request.status==='unknown')loadGuideProject({quiet:true});}}
+}
+function resetGuideConversation({confirmExisting=true}={}) {
+  if(state.guideBusy||guideWorkActive()){state.view='briefing';renderGuidance({preserve:true});notify('这次创作正在处理中，完成后再开启新创作。');return false;}
+  const g=state.guide;
+  if(confirmExisting&&(g.messages.length||g.input.trim()||g.draftImages.length||g.creation)&&!confirm(g.creation&&!g.creation.projectId?'上次生成请求的结果还未确认，旧任务可能仍在处理。开启新创作后再次生成将是新的请求。确认开启？当前对话会清空，已有作品保留。':'开启新的创作对话？当前未发送的文字和图片会清空，已有作品会保留在作品记录中。'))return false;
+  ++guideRequestVersion;++guideCreationVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);state.guide=blankGuidance();state.guideProject=null;state.guideEdit=null;state.guideActionBusy='';resetGuideStyleFilters();state.view='briefing';saveGuidance();renderGuidance();return true;
+}
+async function resumeProjectInGuide(id) {
+  if(state.guide.creation?.projectId===id){state.view='briefing';renderGuidance({preserve:true});await loadGuideProject({quiet:true});return;}
+  if(state.guideBusy||guideWorkActive())return notify('先等待当前创作任务完成，再继续另一份作品。');
+  const existing=state.guide;if((existing.messages.length||existing.input.trim()||existing.draftImages.length||existing.creation)&&!confirm('在对话中继续这份作品？当前对话及未发送的文字和图片会替换，作品记录会保留。'))return;
+  const {project}=await api(`/api/projects/${encodeURIComponent(id)}`);
+  ++guideCreationVersion;++guideRequestVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);
+  const g=blankGuidance();g.source=project.source||'';g.analysis='已载入作品，直接告诉我想改哪里即可。';g.preferences=guidePreferences(project);g.recommendations={...g.recommendations,...g.preferences};g.creation={projectId:project.id,requestId:isGuideUuid(project.creationRequestId)?project.creationRequestId:crypto.randomUUID(),status:project.status,error:'',requestedAt:project.createdAt};
+  state.guide=g;state.guideProject=null;state.guideEdit=null;state.view='briefing';setGuideProject(project);renderGuidance({focusCreation:true});beginGuidePolling();
 }
 
 function guideTrendUrl(value) {
@@ -162,16 +350,16 @@ function guideTrendMatchesView() {
   if(status!=='matched'||!result.matches.length){
     return `<section class="guide-trend-matches guide-trend-empty" aria-label="相关热点匹配"><div class="guide-trend-heading"><div><span class="section-index">A LITTLE OF THE NOW</span><h3>找一点相关的当下</h3></div>${rematch}</div><p>${h(result?.message||defaults[status]||'这段对话还没有匹配热点。可以重新检查当前榜单，也可以按原主题继续。')}</p>${g.trendNotice?`<p class="guide-trend-notice" role="status">${h(g.trendNotice)}</p>`:''}<div class="guide-trend-empty-actions">${['unavailable','error'].includes(status)?'<button class="text-button" data-action="navigate" data-view="trends">去当下热点更新榜单 ↗</button>':''}${!guideTextReady()?'<span>先配置文字模型，才能分析话题相关性。</span>':`<span>${canMatch?'重新匹配会使用一次文字分析。':'不会阻止你继续创作。'}</span>`}</div></section>`;
   }
-  return `<section class="guide-trend-matches" aria-label="相关热点推荐"><div class="guide-trend-heading"><div><span class="section-index">A LITTLE OF THE NOW</span><h3>给这个想法，借一点当下</h3></div>${rematch}</div><p class="guide-trend-intro">找到 ${result.matches.length} 个可结合的选题。最多选一个，也可以按原主题继续。</p>${g.trendNotice?`<p class="guide-trend-notice" role="status">${h(g.trendNotice)}</p>`:''}<div class="guide-trend-cards">${result.matches.map(item=>{const selected=g.selectedTrend?.id===item.id,usable=guideTrendUsable(item);return `<article class="guide-trend-card ${selected?'selected':''}" data-guide-trend-id="${h(item.id)}"><div class="guide-trend-card-meta"><span>${h(trendName(item.platform))}${item.rank?` · ${item.kind==='meme'&&!item.inCurrentBoard?'最近采集榜内':'榜内'}第 ${item.rank} 位`:''}</span><span>${!usable?'已过期':selected?'已选中':h(item.provider||'公开热榜')}</span></div><h4>${item.url?`<a href="${h(item.url)}" target="_blank" rel="noopener noreferrer">${h(item.title)} <span>↗</span></a>`:h(item.title)}</h4>${item.kind==='meme'?`<p class="guide-trend-lifetime ${usable?'':'expired'}">热梗候选 · 至 ${guideTrendDate(item.expiresAt)} 有效<br><span>本机首次收录 ${guideTrendDate(item.firstSeenAt)}，保留 14 天；留存不代表持续火爆。</span></p>`:''}<div class="guide-trend-card-time">源更新 ${guideTrendDate(item.sourceUpdatedAt)} · 采集 ${guideTrendDate(item.fetchedAt)}（北京时间）</div><dl><div><dt>为什么相关</dt><dd>${h(item.reason)}</dd></div><div><dt>结合角度</dt><dd>${h(item.angle)}</dd></div></dl><button type="button" class="button ${selected?'button-secondary':'button-primary'} guide-trend-select" data-action="${selected?'guide-trend-clear':'guide-trend-select'}" data-id="${h(item.id)}" aria-pressed="${selected}" ${!usable?'disabled':''}>${!usable?'已过期，请重新匹配':selected?icon('check')+'已选，点击移除':'结合这个热点 '+icon('arrow')}</button></article>`;}).join('')}</div><div class="guide-trend-footer"><button class="text-button" data-action="guide-trend-clear">不结合热点，按原主题继续</button><span>选中不会额外调用模型；进入创作台时只带入你选的一个。</span></div><p class="guide-trend-facts">匹配依据是热榜标题，相关理由与结合角度是创作建议。创作前请核实原内容与热梗语境。</p></section>`;
+  return `<section class="guide-trend-matches" aria-label="相关热点推荐"><div class="guide-trend-heading"><div><span class="section-index">A LITTLE OF THE NOW</span><h3>给这个想法，借一点当下</h3></div>${rematch}</div><p class="guide-trend-intro">找到 ${result.matches.length} 个可结合的选题。最多选一个，也可以按原主题继续。</p>${g.trendNotice?`<p class="guide-trend-notice" role="status">${h(g.trendNotice)}</p>`:''}<div class="guide-trend-cards">${result.matches.map(item=>{const selected=g.selectedTrend?.id===item.id,usable=guideTrendUsable(item);return `<article class="guide-trend-card ${selected?'selected':''}" data-guide-trend-id="${h(item.id)}"><div class="guide-trend-card-meta"><span>${h(trendName(item.platform))}${item.rank?` · ${item.kind==='meme'&&!item.inCurrentBoard?'最近采集榜内':'榜内'}第 ${item.rank} 位`:''}</span><span>${!usable?'已过期':selected?'已选中':h(item.provider||'公开热榜')}</span></div><h4>${item.url?`<a href="${h(item.url)}" target="_blank" rel="noopener noreferrer">${h(item.title)} <span>↗</span></a>`:h(item.title)}</h4>${item.kind==='meme'?`<p class="guide-trend-lifetime ${usable?'':'expired'}">热梗候选 · 至 ${guideTrendDate(item.expiresAt)} 有效<br><span>本机首次收录 ${guideTrendDate(item.firstSeenAt)}，保留 14 天；留存不代表持续火爆。</span></p>`:''}<div class="guide-trend-card-time">源更新 ${guideTrendDate(item.sourceUpdatedAt)} · 采集 ${guideTrendDate(item.fetchedAt)}（北京时间）</div><dl><div><dt>为什么相关</dt><dd>${h(item.reason)}</dd></div><div><dt>结合角度</dt><dd>${h(item.angle)}</dd></div></dl><button type="button" class="button ${selected?'button-secondary':'button-primary'} guide-trend-select" data-action="${selected?'guide-trend-clear':'guide-trend-select'}" data-id="${h(item.id)}" aria-pressed="${selected}" ${!usable?'disabled':''}>${!usable?'已过期，请重新匹配':selected?icon('check')+'已选，点击移除':'结合这个热点 '+icon('arrow')}</button></article>`;}).join('')}</div><div class="guide-trend-footer"><button class="text-button" data-action="guide-trend-clear">不结合热点，按原主题继续</button><span>选中不会额外调用模型；生成时只结合你选的一个。</span></div><p class="guide-trend-facts">匹配依据是热榜标题，相关理由与结合角度是创作建议。创作前请核实原内容与热梗语境。</p></section>`;
 }
 function chooseGuideTrend(id) {
-  const g=state.guide;if(state.guideBusy||!g.matchTrends)return;
+  const g=state.guide;if(state.guideBusy||g.creation||!g.matchTrends)return;
   const match=g.trendMatches?.matches.find(item=>item.id===id);if(!match)return;
   if(!guideTrendUsable(match)){g.trendNotice='这个热梗已满 14 天或缺少有效期，请重新匹配。';saveGuidance();renderGuidance();return;}
-  g.selectedTrend={...match};g.trendNotice='已选择这个热点，确认进入创作台时会结合到你的原主题中。';saveGuidance();renderGuidance({focusTrends:true});
+  g.selectedTrend={...match};g.trendNotice='已选择这个热点，创作时会结合到你的原主题中。';saveGuidance();renderGuidance({focusTrends:true});
 }
 function clearGuideTrend() {
-  if(state.guideBusy)return;
+  if(state.guideBusy||state.guide.creation)return;
   state.guide.selectedTrend=null;state.guide.trendNotice='这次按原主题继续，不结合热点。';saveGuidance();renderGuidance({focusTrends:true});
 }
 function guideSourceWithTrend(g) {
@@ -181,23 +369,47 @@ function guideSourceWithTrend(g) {
   if(!selected||!guideTrendUsable(selected))return source;
   return `${source}\n\n【用户已选热点】\n主题：${selected.title}${selected.kind==='meme'?`\n类型：热梗候选；本机首次收录 ${guideTrendDate(selected.firstSeenAt)}，至 ${guideTrendDate(selected.expiresAt)} 有效（北京时间）。14 天是本机留存窗口，不代表持续火爆。`:''}\n平台：${trendName(selected.platform)}${selected.rank?'，'+(selected.kind==='meme'&&!selected.inCurrentBoard?'最近采集榜内':'榜内')+'第 '+selected.rank+' 位':''}\n数据来源：${selected.provider||'公开热榜'}\n源更新时间：${guideTrendDate(selected.sourceUpdatedAt)}（北京时间；未知时需先核实）\n采集时间：${guideTrendDate(selected.fetchedAt)}（北京时间）\n原话题链接：${selected.url||'来源未提供，请先补充原内容'}\n为什么相关：${selected.reason}\n结合角度：${selected.angle}\n素材限制：用户原主题、完整素材与创作目标优先；只把这一个已选热点作为切入点或类比。热榜标题不是完整事实，理由与角度是创作建议，不是事实证据。请先核实原内容、时效和热梗语境，不编造热梗含义、出处、人物、经历或数据；不要加入未选择的热点。以上来源与限制供策划参考，不要直接当成图上文案。`;
 }
-async function matchTrendsFromStudio() {
-  if(state.guideBusy)return notify('创作对话正在分析，请等待完成后再匹配热点。');
-  if(state.busy||isActive(state.project))return notify('当前作品正在处理中，完成后再匹配热点。');
-  const source=state.brief.source.trim();
-  if(source.length<5)return notify('请先写下至少 5 个字的创作主题或素材，再匹配相关热点。',true);
-  if(!guideTextReady())return notify('需要先在模型设置里配置文字模型，才能分析主题与热点的相关性。',true);
-  const hasGuide=state.guide.messages.length||state.guide.source||state.guide.input.trim();
-  if((state.dirty||hasGuide)&&!confirm(`${state.dirty?'创作台有未保存的修改。当前素材和参数将完整带入创作对话，确认交接时才替换作品方案。\n':''}${hasGuide?'已有创作对话及未发送的文字将被这次需求替换。\n':''}现在分析可结合的热点吗？会使用一次文字分析。`))return;
-  const g=blankGuidance();g.input=source;g.studioSource=source;g.preferences=guidePreferences(state.brief);g.recommendations={...g.recommendations,...g.preferences};g.matchTrends=true;
-  guideRequestVersion++;state.guide=g;state.guideEdit=null;state.view='briefing';saveGuidance();render();await sendGuidance();
+const guideStyleSearchText = value => String(value||'').normalize('NFKC').toLocaleLowerCase().trim();
+function filteredGuideStyles() {
+  const query=guideStyleSearchText(state.guideStyleSearch);
+  return guideStyles().filter(style=>(state.guideStyleCategory==='all'||style.category===state.guideStyleCategory)&&(!query||guideStyleSearchText([style.name,style.description,style.id,...style.aliases].join(' ')).includes(query)));
 }
-
+function guideStyleResultsView() {
+  const list=filteredGuideStyles(),g=state.guide;
+  if(!list.length)return `<div class="guide-style-empty"><p>没有找到匹配的风格</p><span>试试“摄影”“复古”“3D”，或换个分类。</span><button type="button" class="text-button" data-action="guide-style-clear">清除搜索与分类</button></div>`;
+  return `<div class="guide-choices guide-style-choices">${list.map(style=>{
+    const selected=style.id===g.preferences.style,recommended=style.id===g.recommendations.style;
+    const badge=selected?(recommended?'已选 · 建议':'已选'):recommended?'建议':'';
+    return `<button type="button" class="guide-choice guide-style-choice ${selected?'selected':''} ${recommended?'recommended':''}" data-action="guide-choice" data-field="style" data-value="${h(style.id)}" aria-pressed="${selected}" aria-label="${h(style.name)}${selected?'，已选':''}${recommended?'，建议':''}" aria-describedby="guide-style-description-${h(style.id)}"><span class="guide-style-title"><strong>${h(style.name)}</strong>${badge?`<span class="guide-style-badge ${selected?'is-selected':''}">${h(badge)}</span>`:''}</span><small id="guide-style-description-${h(style.id)}">${h(style.description)}</small><span class="guide-style-category">${h(style.category)}</span></button>`;
+  }).join('')}</div>`;
+}
+function guideStyleResultLabel() {
+  const total=guideStyles().length,count=filteredGuideStyles().length;
+  return count===total?`${total} 种风格，选择后即可继续`:`找到 ${count} / ${total} 种风格`;
+}
+function guideStylePickerView() {
+  const list=guideStyles(),selected=list.find(style=>style.id===state.guide.preferences.style),recommended=list.find(style=>style.id===state.guide.recommendations.style);
+  const categories=['all',...STYLE_CATEGORIES];
+  return `<div class="guide-style-picker"><div class="guide-style-tools"><div class="guide-style-search"><label class="sr-label" for="guide-style-search">搜索图片风格</label>${icon('search')}<input id="guide-style-search" type="search" maxlength="120" placeholder="搜索风格，例如：摄影、水彩、3D" autocomplete="off" value="${h(state.guideStyleSearch)}" aria-controls="guide-style-results"/></div><p class="guide-style-current">${selected?`已选：<strong>${h(selected.name)}</strong>`:recommended?`建议：<strong>${h(recommended.name)}</strong>`:'选择适合这次内容的画面语言'}</p></div><div class="guide-style-categories" role="group" aria-label="按图片风格分类筛选">${categories.map(category=>{
+    const count=category==='all'?list.length:list.filter(style=>style.category===category).length,label=category==='all'?'全部':category;
+    return `<button type="button" class="${state.guideStyleCategory===category?'active':''}" data-action="guide-style-category" data-category="${h(category)}" aria-pressed="${state.guideStyleCategory===category}" aria-label="${h(label)}，${count}种风格" ${count?'':'disabled'}>${h(label)}<span aria-hidden="true">${count}</span></button>`;
+  }).join('')}</div><p id="guide-style-result-count" class="guide-style-result-count" role="status" aria-live="polite">${guideStyleResultLabel()}</p><div id="guide-style-results" class="guide-style-results">${guideStyleResultsView()}</div><p class="guide-style-hint">也可以直接在对话里描述想要的质感、配色和氛围。</p></div>`;
+}
+function updateGuideStyleResults() {
+  const results=document.querySelector('#guide-style-results');if(!results)return;
+  results.innerHTML=guideStyleResultsView();
+  const count=document.querySelector('#guide-style-result-count');if(count)count.textContent=guideStyleResultLabel();
+  document.querySelectorAll('[data-action="guide-style-category"]').forEach(button=>{
+    const active=button.dataset.category===state.guideStyleCategory;
+    button.classList.toggle('active',active);button.setAttribute('aria-pressed',String(active));
+  });
+}
+function resetGuideStyleFilters() {state.guideStyleCategory='all';state.guideStyleSearch='';}
 function guideQuestionView(field) {
   const g=state.guide, rec=g.recommendations[field];
   const index=['style','aspect','count'].indexOf(field)+1;
   let options;
-  if(field==='style')options=`<div class="guide-choices">${guideStyles().map(s=>`<button class="guide-choice ${s.id===rec?'recommended':''} ${s.id===g.preferences.style?'selected':''}" data-action="guide-choice" data-field="style" data-value="${h(s.id)}"><strong>${h(s.name)}</strong><small>${h(s.description)}</small>${s.id===rec?'<span class="choice-recommended">建议</span>':''}</button>`).join('')}</div>`;
+  if(field==='style')options=guideStylePickerView();
   else if(field==='aspect')options=`<div class="guide-choices guide-aspect-choices">${[['3:4','portrait','竖版图文'],['1:1','square','方形卡片'],['16:9','landscape','横版展示']].map(([value,shape,label])=>`<button class="guide-choice ${value===rec?'recommended':''}" data-action="guide-choice" data-field="aspect" data-value="${value}"><span class="guide-ratio-icon ratio-${shape}" aria-hidden="true"></span><strong>${value}</strong><small>${label}</small>${value===rec?'<span class="choice-recommended">建议</span>':''}</button>`).join('')}</div>`;
   else {const counts=[...new Set([1,3,5,6,8,10,Number(rec)])].filter(n=>n>=1&&n<=10).sort((a,b)=>a-b);options=`<div class="guide-count-choices">${counts.map(n=>`<button class="guide-choice ${n===rec?'recommended':''}" data-action="guide-choice" data-field="count" data-value="${n}"><strong>${n} 张</strong>${n===rec?'<span class="choice-recommended">建议</span>':''}</button>`).join('')}</div><div class="guide-custom-count"><label for="guide-custom-count">也可以自定张数</label><input id="guide-custom-count" type="number" min="1" max="10" value="${rec}" aria-label="自定义图片张数"><button class="button button-secondary" data-action="guide-count">确定</button></div>`;}
   return `<section class="guide-question"><span class="section-index">${String(index).padStart(2,'0')} / ${guideFieldLabel(field)}</span><h3>${guideQuestion(field)}</h3><p>${h(g.reasons[field]||'选择你更喜欢的方向，也可以在下面直接告诉我。')}</p>${options}${state.guideEdit?'<button class="text-button" data-action="guide-cancel-edit">保留原选择</button>':''}</section>`;
@@ -208,43 +420,88 @@ function trimGuideMessages(messages) {
   while(total>60000&&limited.length>2){total-=limited[1].content.length;limited.splice(1,1);}
   return limited;
 }
-function renderGuidance({focusTrends=false}={}) {
+function renderGuidance({focusTrends=false,focusCreation=false,preserve=false}={}) {
   if(state.view!=='briefing')return;
+  const thread=document.querySelector('.guide-thread'),focused=document.activeElement;
+  const previousScroll=thread?.scrollTop||0,nearBottom=!thread||thread.scrollHeight-thread.scrollTop-thread.clientHeight<95;
+  const previousChat=thread?.querySelector('.guide-project-chat')?.textContent||'';
+  const inputFocused=focused?.id==='guide-input',selection=inputFocused?[focused.selectionStart,focused.selectionEnd]:null;
+  const pageScroll=window.scrollY;
   render();
-  requestAnimationFrame(()=>{const thread=document.querySelector('.guide-thread');if(!thread||!state.guide.messages.length)return;const target=focusTrends?thread.querySelector('.guide-trend-matches'):null;if(target&&thread.scrollHeight>thread.clientHeight+4)thread.scrollTop+=target.getBoundingClientRect().top-thread.getBoundingClientRect().top-18;else thread.scrollTop=thread.scrollHeight;});
+  if(inputFocused){const input=document.querySelector('#guide-input');if(input&&!input.disabled){input.focus({preventScroll:true});if(selection)input.setSelectionRange(...selection);}}
+  requestAnimationFrame(()=>{
+    const next=document.querySelector('.guide-thread');if(!next)return;
+    const nextChat=next.querySelector('.guide-project-chat')?.textContent||'';
+    const hasNewChat=Boolean(nextChat.trim())&&nextChat!==previousChat;
+    if(preserve&&(inputFocused||!nearBottom||(state.guide.creation&&!hasNewChat)))next.scrollTop=previousScroll;
+    else{
+      let target=focusTrends?next.querySelector('.guide-trend-matches'):next.querySelector('.guide-style-picker')?.closest('.guide-question');
+      if(focusCreation&&!focusTrends){
+        const preferences=next.querySelector('.guide-inline-brief');
+        const replies=next.querySelectorAll('.guide-message.assistant');
+        const reply=replies[replies.length-1];
+        target=preferences||next.querySelector('.guide-creation');
+        if(reply&&preferences&&preferences.getBoundingClientRect().top-reply.getBoundingClientRect().top<220)target=reply;
+      }
+      if(target&&next.scrollHeight>next.clientHeight+4)next.scrollTop+=target.getBoundingClientRect().top-next.getBoundingClientRect().top-18;
+      else next.scrollTop=next.scrollHeight;
+    }
+    if(preserve)window.scrollTo(window.scrollX,pageScroll);
+  });
 }
 async function sendGuidance({retry=false,rematch=false}={}) {
-  if(state.guideBusy)return;
-  if(!guideTextReady())return notify('请先配置文字模型，然后回来开始创作对话。',true);
+  if(state.guideUploadBusy||state.guideBusy||state.guideActionBusy)return;
   const g=state.guide;
+  if(g.creation){if(rematch)return notify('这次作品已开始创作。需要改动时，直接在对话里说明即可。');return sendGuideProjectMessage();}
+  if(!guideTextReady())return notify('请先配置文字模型，然后回来开始创作对话。',true);
+  const input=g.input.trim(),previousDecision=g.decision;
   if(rematch){
-    if(g.input.trim())return notify('还有未发送的补充，请先发送，再重新匹配热点。',true);
+    if(input||g.draftImages.length)return notify('还有未发送的补充，请先发送，再重新匹配热点。',true);
     if(!g.source.trim())return notify('请先说说你想创作什么，再匹配相关热点。');
     if(!g.messages.length)g.messages.push({role:'user',content:g.source});
-    g.matchTrends=true;
-    g.messages.push({role:'user',content:'请保留当前创作主题、完整素材和已确认的风格、比例、张数，重新检查当前榜单里有没有适合自然结合的热点。只推荐相关内容，找不到就按原主题继续，不要为了热点改变主题。'});
-  }else if(!retry){const text=g.input.trim();if(!text)return notify('先写下你想创作什么。');g.messages.push({role:'user',content:text});g.input='';}
+    g.matchTrends=true;g.messages.push({role:'user',content:'请保留当前创作主题、完整素材和已确认的风格、比例、张数，重新检查当前榜单里有没有适合自然结合的热点。只推荐相关内容，不要为了热点改变主题。这是一次更新热点建议的操作，保留已有的需求问题，不把它当作我对问题的回答。'});
+  }else if(!retry){
+    const images=normalizeGuideImages(g.draftImages);
+    if(!input&&!images.length)return notify('先写下想法，或把产品图片粘贴进来。');
+    const references=mergeGuideImages(g.referenceImages,images);
+    if(references.length>GUIDE_IMAGE_LIMIT)return notify(`这次创作最多使用 ${GUIDE_IMAGE_LIMIT} 张产品图片。`,true);
+    g.referenceImages=references;
+    g.messages.push({role:'user',content:input||'请结合这些产品图片，帮我规划一组宣传图文。',...(images.length?{images}:{})});
+    g.input='';g.draftImages=[];g.attachmentError='';
+  }
   if(g.messages.at(-1)?.role!=='user')return;
-  const messages=trimGuideMessages(g.messages);
-  g.messages=messages;
-  const preferences={...g.preferences};
-  g.error='';g.pending=true;state.guideBusy=true;state.guideEdit=null;
-  let analyzed=false;
-  const version=++guideRequestVersion;saveGuidance();renderGuidance();
+  const messages=trimGuideMessages(g.messages);g.messages=messages;const preferences={...g.preferences};
+  g.error='';g.creationError='';g.pending=true;state.guideBusy=true;state.guideEdit=null;
+  let shouldCreate=false;const version=++guideRequestVersion;saveGuidance();renderGuidance();
   try{
-    const result=await api('/api/brief/chat',{method:'POST',body:{messages,preferences,matchTrends:g.matchTrends}});
+    const result=await api('/api/brief/chat',{method:'POST',body:{messages,preferences,matchTrends:g.matchTrends,clarificationAsked:g.clarificationAsked,referenceIds:g.referenceImages.map(image=>image.id)}});
     if(version!==guideRequestVersion)return;
     if(typeof result.analysis!=='string'||typeof result.source!=='string'||!result.source.trim()||!result.recommendations)throw new Error('分析结果不完整，请重试。');
-    g.analysis=result.analysis;g.source=result.source;g.preferences=guidePreferences(result.preferences);g.recommendations={...blankGuidance().recommendations,...result.recommendations};g.reasons=result.reasons||{};
+    let decision=normalizeGuideDecision(result.decision);
+    if(!decision)throw new Error('分析结果缺少有效的下一步安排，请重试这次分析。');
+    if(rematch)decision=previousDecision||{...decision,action:'hold',questions:[]};
+    g.analysis=result.analysis;g.source=result.source;g.preferences=guidePreferences(result.preferences);g.recommendations={...blankGuidance().recommendations,...result.recommendations};g.reasons=result.reasons||{};g.decision=decision;
     const previousTrend=g.selectedTrend;
     g.trendMatches=normalizeGuideTrendMatches(result.trendMatches)||{status:g.matchTrends?'unavailable':'disabled',checkedAt:null,candidateCount:0,excludedCount:0,matches:[],message:g.matchTrends?'这次没有收到热点匹配结果，可以按原主题继续，或稍后重新匹配。':'已关闭热点匹配，将按原主题继续。'};
     g.selectedTrend=g.matchTrends&&previousTrend?g.trendMatches.matches.find(item=>item.id===previousTrend.id&&guideTrendUsable(item))||null:null;
     g.trendNotice=previousTrend&&!g.selectedTrend?'主题分析已更新，之前选择的热点不再出现在匹配结果中，已移除。你可以重新选择或按原主题继续。':'';
-    g.messages.push({role:'assistant',content:result.reply||'我已整理好内容方向，接下来一起确认画面的样子。'});
-    g.messages=trimGuideMessages(g.messages);analyzed=true;
+    if(rematch)g.messages.push({role:'assistant',content:'已更新相关热点建议，可以展开“创作方向与偏好”查看。继续补充创作需求即可，是否结合热点由你决定。'});
+    else if(decision.action==='ask'){
+      g.clarificationAsked=true;
+      g.messages.push({role:'assistant',kind:'clarification',content:[result.reply||'我先把需要补充的信息一起列出来：',...decision.questions.map((q,index)=>`${index+1}. ${q.question}`),'一次回复即可；拿不准的风格、比例和张数可以说“你定”。回答后，我会直接生成完整图文。'].join('\n\n')});
+    }else if(decision.action==='generate'&&!rematch){
+      g.preferences={...decision.resolvedSpec};
+      g.messages.push({role:'assistant',content:[result.reply||decision.summary||'创作方向已经清楚，我来完成帖子文案和整组图片。',`本次采用：${guideValueLabel('style',g.preferences.style)} · ${guideValueLabel('aspect',g.preferences.aspect)} · ${guideValueLabel('count',g.preferences.count)}。现在开始创作。`].join('\n\n')});
+      shouldCreate=true;
+    }else g.messages.push({role:'assistant',content:result.reply||'已记下你的想法。继续在这里补充，准备好后我会接着创作。'});
+    g.messages=trimGuideMessages(g.messages);
   }catch(error){if(version===guideRequestVersion)g.error=error.message;}
-  finally{if(version===guideRequestVersion){g.pending=false;state.guideBusy=false;saveGuidance();renderGuidance({focusTrends:analyzed&&g.matchTrends});}}
+  finally{if(version===guideRequestVersion){g.pending=false;state.guideBusy=false;saveGuidance();renderGuidance();}}
+  // Only a freshly validated response can start paid work. Restoring the saved
+  // conversation or polling an existing project never crosses this transition.
+  if(version===guideRequestVersion&&state.guide===g&&shouldCreate)await startGuideCreation();
 }
+
 function chooseGuidePreference(field,value) {
   if(state.guideBusy)return;
   const g=state.guide;
@@ -252,29 +509,10 @@ function chooseGuidePreference(field,value) {
   const parsed=guidePreferences({...g.preferences,[field]:field==='count'?Number(value):value});
   if(!['style','aspect','count'].includes(field)||parsed[field]===null)return notify('请选择支持的风格、比例或 1–10 张图片。',true);
   g.preferences=parsed;g.error='';state.guideEdit=null;
-  const next=currentGuideField();
-  g.messages.push({role:'user',content:`${guideFieldLabel(field)}：${guideValueLabel(field,parsed[field])}`},{role:'assistant',content:`好，采用「${guideValueLabel(field,parsed[field])}」。${next?'接下来确认一下'+guideFieldLabel(next)+'。':'创作参数已确认，可以进入创作台了。'}`});
+  if(field==='style')resetGuideStyleFilters();
+  g.decision=null;
+  g.messages.push({role:'user',content:`${guideFieldLabel(field)}：${guideValueLabel(field,parsed[field])}`},{role:'assistant',content:`已记下「${guideValueLabel(field,parsed[field])}」。把其余补充一起发给我就好。`});
   g.messages=trimGuideMessages(g.messages);saveGuidance();renderGuidance();
-}
-function acceptGuideRecommendations() {
-  if(state.guideBusy||!state.guide.analysis)return;
-  const g=state.guide;
-  for(const f of ['style','aspect','count'])if(g.preferences[f]===null)g.preferences[f]=g.recommendations[f];
-  g.preferences=guidePreferences(g.preferences);g.error='';state.guideEdit=null;
-  g.messages.push({role:'user',content:'尚未选择的参数采用你的建议。'},{role:'assistant',content:'已经整理好创作方向。检查右侧的参数，确认后就可以进入创作台。'});
-  g.messages=trimGuideMessages(g.messages);saveGuidance();renderGuidance();
-}
-function handoffGuidance() {
-  if(state.guideBusy||!guidanceReady()||state.guide.error)return;
-  if(state.dirty&&!confirm('创作台还有未保存的修改，确定带入这次的新创作需求吗？'))return;
-  const g=state.guide,p=g.preferences;
-  if(g.input.trim())return notify('还有未发送的补充，请先发送后再确认。',true);
-  if(g.selectedTrend&&!guideTrendUsable(g.selectedTrend)){g.selectedTrend=null;g.trendNotice='已选热梗已满 14 天或缺少有效期，已移除。请重新匹配，或按原主题继续。';saveGuidance();renderGuidance();return notify(g.trendNotice,true);}
-  const source=guideSourceWithTrend(g);
-  if(source.length>24000)return notify('完整素材加上热点信息超过 24000 字，请先精简素材后再进入创作台。原素材仍保留在对话中。',true);
-  state.brief={source,style:p.style,aspect:p.aspect,count:p.count,mode:p.mode||'cards'};
-  state.project=null;state.draft=null;state.selectedPage=null;state.dirty=false;state.editorTab='outline';state.view='studio';
-  clearTimeout(pollTimer);pollVersion++;saveGuidance();render();notify('创作需求已带入。检查后点击“生成内容方案”即可继续。');
 }
 
 async function api(url, options = {}) {
@@ -283,7 +521,7 @@ async function api(url, options = {}) {
     response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers }, ...(options.body !== undefined ? {body: JSON.stringify(options.body)} : {}) });
   } catch { throw new Error('无法连接本地服务，请确认工作台服务正在运行。'); }
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message || `请求失败（${response.status}）`);
+  if (!response.ok){const error=new Error(typeof payload.error === 'string' ? payload.error : payload.error?.message || payload.message || `请求失败（${response.status}）`);error.status=response.status;throw error;}
   return payload;
 }
 function notify(message, error = false) {
@@ -293,45 +531,14 @@ function notify(message, error = false) {
   toastEl.hidden = false;
   toastTimer = setTimeout(() => { toastEl.hidden = true; }, error ? 6500 : 3500);
 }
-function setProject(project, {reset = false} = {}) {
-  if (!project) return;
-  const previous = state.project;
-  if (previous?.id !== project.id) state.editorTab = 'outline';
-  state.project = project;
-  if (reset || !state.dirty) state.draft = structuredClone(project);
-  if (reset) state.dirty = false;
-  if (!project.pages?.some(p => p.id === state.selectedPage)) state.selectedPage = project.pages?.[0]?.id || null;
-  const index = state.projects.findIndex(p => p.id === project.id);
-  if (index < 0) state.projects.unshift(project);
-  else state.projects[index] = project;
-}
-function beginPolling() {
-  clearTimeout(pollTimer);
-  const version = ++pollVersion;
-  const run = async () => {
-    if (version !== pollVersion || !state.project || !isActive(state.project)) return;
-    const id = state.project.id;
-    try {
-      const {project} = await api(`/api/projects/${encodeURIComponent(id)}`);
-      if (version !== pollVersion || state.project?.id !== id) return;
-      const wasActive = isActive(state.project);
-      setProject(project);
-      if (state.view === 'studio' || state.view === 'history') render();
-      if (wasActive && !isActive(project)) notify(project.status === 'completed' ? '作品生成完成，可以预览和下载了。' : project.status === 'draft' ? '内容方案已生成，请检查文案后开始出图。' : project.error || '任务已结束，请检查结果。', ['error', 'partial', 'interrupted'].includes(project.status));
-    } catch (error) { notify(error.message, true); }
-    if (version === pollVersion && isActive(state.project)) pollTimer = setTimeout(run, 1800);
-  };
-  if (isActive(state.project)) pollTimer = setTimeout(run, 1500);
-}
-
 function sidebar() {
-  const links = [['briefing','创作对话','对话','01'],['studio','创作台','创作','02'],['trends','当下热点','热点','03'],['history','作品记录','作品','04'],['settings','模型设置','模型','05']];
-  return `<header class="site-header"><a href="#" class="brand" data-action="navigate" data-view="briefing" aria-label="图文工坊首页"><span class="brand-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>图文工坊<small>THE CONTENT ATELIER</small></span></a><nav class="main-nav" aria-label="主要导航">${links.map(([view,label,short,index]) => `<button class="nav-item ${state.view === view ? 'active' : ''}" data-action="navigate" data-view="${view}" aria-label="${label}" ${state.view === view ? 'aria-current="page"' : ''}><span class="nav-full-label">${label}</span><span class="nav-short-label">${short}</span><small>${index}</small>${view === 'history' && state.projects.length ? `<span class="nav-count">${state.projects.length}</span>` : ''}</button>`).join('')}</nav><div class="header-end"><span class="local-indicator"><i></i>本地工作空间</span><span class="avatar" aria-label="个人创作空间">我</span></div></header>`;
+  const links = [['briefing','创作对话','对话','01'],['trends','当下热点','热点','02'],['history','作品记录','作品','03'],['settings','模型设置','模型','04']];
+  const newConversation=state.view==='briefing'&&(state.guide.creation||state.guide.messages.length||state.guide.draftImages.length)?`<button type="button" class="header-new button button-secondary" data-action="guide-new" aria-label="新建对话" ${guideWorkActive()||state.guideBusy?'disabled':''}>${icon('plus')}<span class="header-new-label">新建对话</span></button>`:'';
+  return `<header class="site-header"><a href="#" class="brand" data-action="navigate" data-view="briefing" aria-label="图文工坊首页"><span class="brand-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>图文工坊<small>THE CONTENT ATELIER</small></span></a><nav class="main-nav" aria-label="主要导航">${links.map(([view,label,short,index]) => `<button class="nav-item ${state.view === view ? 'active' : ''}" data-action="navigate" data-view="${view}" aria-label="${label}" ${state.view === view ? 'aria-current="page"' : ''}><span class="nav-full-label">${label}</span><span class="nav-short-label">${short}</span><small>${index}</small>${view === 'history' && state.projects.length ? `<span class="nav-count">${state.projects.length}</span>` : ''}</button>`).join('')}</nav><div class="header-end">${newConversation}<span class="local-indicator"><i></i>本地工作空间</span><span class="avatar" aria-label="个人创作空间">我</span></div></header>`;
 }
 function header() {
   const labels = {
     briefing:['GOOD CONTENT STARTS WITH A CONVERSATION.','一个想法，<span>我们一起聊清楚<i>。</i></span>','先说想做什么，接下来的问题交给我。'],
-    studio:['A LITTLE IDEA. A BEAUTIFUL STORY.','好想法，<span>值得好好表达<i>。</i></span>','把内容交给 AI，把创作的决定留给你。'],
     trends:['A PULSE OF WHAT PEOPLE ARE TALKING ABOUT.','捕捉当下，<span>找到新的灵感<i>。</i></span>','看看大家正在聊什么，把好话题变成你的内容。'],
     history:['YOUR CREATIVE COLLECTION','让作品，<span>慢慢积累<i>。</i></span>','每一次认真表达，都值得留下。'],
     settings:['TOOLS FOR YOUR NEXT IDEA','让工具，<span>顺手起来<i>。</i></span>','连接你自己的文字与图片模型。'],
@@ -339,70 +546,13 @@ function header() {
   const [eyebrow, title, sub] = labels[state.view];
   const modelReady=state.view==='trends'?Boolean(state.trends?.items?.length):state.view==='briefing'?guideTextReady():state.config?.configured;
   const modelLabel=state.view==='trends'?'公开热榜 · 无需模型':state.view==='briefing'?(modelReady?'文字模型已配置':'等待配置文字模型'):(modelReady?'模型已配置':'等待配置模型');
-  return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span class="connection ${modelReady ? 'connected' : ''}"><i></i>${modelLabel}</span>${state.view === 'briefing' ? `<button class="button button-secondary" data-action="navigate" data-view="studio">直接去创作台 <span>↗</span></button>` : state.view !== 'settings' ? `<button class="button button-ink" data-action="new">${icon('plus')}新建创作<span class="button-arrow">↗</span></button>` : ''}</div></header>`;
+  if(state.view==='briefing')return `<header class="page-header conversation-page-header"><h1 class="sr-label">创作对话</h1><span class="connection ${modelReady?'connected':''}"><i></i>${modelLabel}</span></header>`;
+  return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span class="connection ${modelReady ? 'connected' : ''}"><i></i>${modelLabel}</span>${state.view !== 'briefing' && state.view !== 'settings' ? `<button class="button button-ink" data-action="new">${icon('plus')}新建创作<span class="button-arrow">↗</span></button>` : ''}</div></header>`;
 }
 function render() {
   if(state.view!=='trends')clearTimeout(trendsPollTimer);
-  app.innerHTML = `<div class="app-shell view-${state.view}">${sidebar()}<main class="main">${header()}${state.bootError ? `<div class="banner banner-error">${icon('alert')}<span>${h(state.bootError)}</span><button class="text-button" data-action="reload">重试连接</button></div>` : ''}${state.view === 'briefing' ? guidanceView() : state.view === 'studio' ? studio() : state.view === 'trends' ? trendsView() : state.view === 'history' ? historyView() : settingsView()}<footer class="main-footer"><span>图文工坊 <i>©</i> ${new Date().getFullYear()}</span><span>一个给好内容的创作空间。</span><span>MADE FOR YOUR NEXT IDEA.</span></footer></main></div>`;
+  app.innerHTML = `<div class="app-shell view-${state.view}">${sidebar()}<main class="main">${header()}${state.bootError ? `<div class="banner banner-error">${icon('alert')}<span>${h(state.bootError)}</span><button class="text-button" data-action="reload">重试连接</button></div>` : ''}${state.view === 'briefing' ? guidanceView() : state.view === 'trends' ? trendsView() : state.view === 'history' ? historyView() : settingsView()}<footer class="main-footer"><span>图文工坊 <i>©</i> ${new Date().getFullYear()}</span><span>一个给好内容的创作空间。</span><span>MADE FOR YOUR NEXT IDEA.</span></footer></main></div>`;
 }
-function studio() {
-  const p = state.project;
-  const documentTitle = state.draft?.title || p?.title || '一份新的好内容';
-  const title = p && canEdit(p) ? `<input class="workspace-title-input" data-edit="project-title" aria-label="作品标题" value="${h(documentTitle)}" maxlength="200"/>` : `<span>${h(documentTitle)}</span>`;
-  return `${!state.config?.configured ? `<div class="banner">${icon('bolt')}<span>连接你的模型 API，即可开始图文创作。</span><button class="text-button" data-action="navigate" data-view="settings">去设置 ${icon('arrow')}</button></div>` : ''}<section class="editor-studio" aria-label="图文创作工作台"><div class="workspace-heading"><div class="document-name">${icon('file')}${title}<span class="workspace-tag ${p ? `badge badge-${h(p.status)}` : ''}">${p ? statusText(p.status) : '新创作'}</span></div><div class="save-state"><i></i>${p ? time(p.updatedAt) + ' 更新' : '从一个想法开始'}</div></div><div class="studio-grid">${briefPanel()}<section class="canvas-panel">${p ? projectPanel() : emptyCanvas()}</section></div></section><section class="below-editor"><div><span class="micro-cross" aria-hidden="true">＋</span><p>灵感不必完整，<em>开始就很好。</em></p></div><span>CONCEIVED BY YOU. CRAFTED WITH AI.</span><button class="text-button" data-action="navigate" data-view="history">看看最近的作品 <span>↗</span></button></section>`;
-}
-function briefPanel() {
-  const b = state.brief;
-  const locked = isActive(state.project) || state.busy === 'create';
-  const completedClean = state.project?.status === 'completed' && !state.dirty;
-  const styleOptions = state.config?.styles?.length ? state.config.styles : [{id:'notion',name:'手绘知识',description:'干净线条、浅色纸感，适合知识分享'},{id:'editorial',name:'杂志编辑',description:'清晰层级与留白，适合观点或产品介绍'},{id:'warm',name:'温暖生活',description:'柔和暖色，适合故事与日常分享'},{id:'bold',name:'醒目海报',description:'强烈对比和大标题，适合宣传与清单'},{id:'blueprint',name:'工程蓝图',description:'技术图解，适合流程和结构说明'},{id:'minimal',name:'极简留白',description:'简约克制，适合品牌与概念表达'}];
-  return `<section class="brief-panel panel"><div class="panel-heading"><span class="section-number">01</span><h2>创作简报</h2><span class="muted">从内容开始</span></div><form id="brief-form"><fieldset ${locked ? 'disabled' : ''}><label class="field-label" for="source">想要创作什么？<button type="button" class="text-button" data-action="sample">试试示例</button></label><textarea id="source" name="source" class="source-input" placeholder="输入一个主题、一段文章或产品介绍…&#10;&#10;例如：给第一次养猫的人，做一组实用的准备清单。" required minlength="5" maxlength="24000">${h(b.source)}</textarea><div class="input-note"><span>内容越具体，生成效果越贴近你的想法</span><span id="source-count">${b.source.length}</span></div><label class="field-label">内容形式</label><div class="mode-options">${[['cards','cards','多页图文'],['infographic','chart','信息图'],['cover','image','封面海报']].map(([id,i,name]) => `<label class="mode-option ${b.mode === id ? 'selected' : ''}"><input type="radio" name="mode" value="${id}" ${b.mode === id ? 'checked' : ''}/>${icon(i)}<span>${name}</span></label>`).join('')}</div><label class="field-label" for="style">视觉风格</label><select id="style" name="style">${styleOptions.map(s => `<option value="${h(s.id)}" ${b.style === s.id ? 'selected' : ''}>${h(s.name)}${s.description ? ' · ' + h(s.description) : ''}</option>`).join('')}</select><div class="brief-options"><div><label class="field-label" for="aspect">图片比例</label><select id="aspect" name="aspect">${[['3:4','3:4 · 竖版'],['1:1','1:1 · 方形'],['16:9','16:9 · 横版']].map(([v,l]) => `<option value="${v}" ${b.aspect === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div><div><label class="field-label" for="count">图片张数</label><div class="count-input"><button type="button" data-action="count" data-delta="-1" aria-label="减少张数" ${b.mode !== 'cards' ? 'disabled' : ''}>−</button><input id="count" name="count" type="number" min="1" max="10" value="${b.mode === 'cards' ? b.count : 1}" ${b.mode !== 'cards' ? 'disabled' : ''}/><button type="button" data-action="count" data-delta="1" aria-label="增加张数" ${b.mode !== 'cards' ? 'disabled' : ''}>+</button></div></div></div><p class="field-help ratio-note">比例为构图目标，实际像素尺寸以模型输出为准。</p><div class="brief-trend-entry"><button type="button" class="text-button" data-action="guide-from-studio" ${locked||state.guideBusy?'disabled':''}>${icon('search')}先匹配相关热点 ${icon('arrow')}</button><p>${guideTextReady()?'可选：使用一次文字分析，选中后再带入方案。':'需要先配置文字模型，再分析可结合的热点。'}</p></div><div class="brief-divider"></div><button type="submit" class="button ${completedClean ? 'button-secondary' : 'button-primary'} button-full" ${!state.config?.configured || locked ? 'disabled' : ''}>${buttonBusy('create') || icon('spark')}${state.busy === 'create' ? '正在创建…' : '生成内容方案'}${icon('arrow')}</button><p class="form-help">先生成拆页与文案，确认后再调用图片模型。</p></fieldset></form><div class="brief-bottom">${icon('lock')}API 密钥由本地服务保存</div></section>`;
-}
-function emptyCanvas() {
-  return `<div class="empty-studio"><div class="canvas-topline"><span>${icon('image')}创作画布</span><span class="mini-label">等待你的第一个想法</span></div><div class="empty-art" aria-hidden="true"><div class="paper paper-back"></div><div class="paper paper-front"><span class="empty-paper-label">THE CREATOR'S NOTE</span><div class="empty-paper-title">把想法，<br>好好表达。</div><i></i><i></i><span class="empty-paper-mark">↗</span></div><span class="art-dot dot-one"></span><span class="art-dot dot-two"></span></div><div class="empty-copy"><span class="eyebrow">MAKE SOMETHING WORTH SHARING</span><h2>从一个想法，<br>开始一份作品。</h2><p>写下主题或粘贴素材，先梳理内容与画面，<br>确认后再生成属于你的图文。</p></div><div class="workflow"><div><span>01</span><strong>输入内容</strong><small>给创作一个起点</small></div><i>→</i><div><span>02</span><strong>确认方案</strong><small>文案与视觉由你把关</small></div><i>→</i><div><span>03</span><strong>生成作品</strong><small>预览、调整、下载</small></div></div><div class="canvas-footnote">${icon('file')}生成后的图片会保存在这里，当前尚无生成结果。</div></div>`;
-}
-function projectPanel() {
-  const p = state.project;
-  const draft = state.draft || p;
-  const pages = draft.pages || [];
-  const done = p.pages?.filter(page => page.status === 'done').length || 0;
-  const active = isActive(p);
-  const editable = canEdit(p);
-  const imageEdits = hasImageEdits();
-  const page = pages.find(page => page.id === state.selectedPage) || pages[0];
-  const currentIndex = pages.findIndex(item => item.id === page?.id);
-  const editorMode = state.editorTab === 'preview' ? 'preview' : 'outline';
-  const tabs = pages.length ? `<div class="project-toolbar"><div class="editor-tabs" role="tablist" aria-label="创作工作区视图">${[['outline','图文编辑'],['preview','大图预览']].map(([tab,label]) => `<button id="editor-tab-${tab}" class="editor-tab ${editorMode === tab ? 'active' : ''}" role="tab" aria-selected="${editorMode === tab}" aria-controls="page-detail-panel" data-action="editor-tab" data-tab="${tab}">${label}</button>`).join('')}</div><span class="editor-page-indicator">${String(currentIndex + 1).padStart(2,'0')} / ${String(pages.length).padStart(2,'0')}</span></div>` : '';
-  const rail = `<div class="page-rail" aria-label="页面选择">${pages.map((item,index) => `<button class="page-thumb ${item.id === page?.id ? 'selected' : ''}" data-action="select-page" data-id="${h(item.id)}" aria-label="第 ${index + 1} 页：${h(item.title)}" aria-pressed="${item.id === page?.id}"><div class="thumb-preview" data-aspect="${h(p.aspect)}">${item.imageUrl ? `<img src="${h(item.imageUrl)}" alt="第 ${index+1} 页缩略图"/>` : `<span class="thumb-number">${String(index+1).padStart(2,'0')}</span><span class="thumb-title">${h(item.title)}</span>`}${item.status === 'generating' ? '<span class="thumb-generating"><span class="spinner"></span></span>' : ''}</div><span class="thumb-label"><span>${String(index+1).padStart(2,'0')} · ${h(item.title)}</span><i class="page-dot page-dot-${h(item.status)}"></i></span></button>`).join('')}</div>`;
-  const content = p.status === 'analyzing' ? analysisState(p) : pages.length ? `${tabs}<div class="page-workspace ${editorMode}-mode"><div id="page-detail-panel" class="page-detail" role="tabpanel" aria-labelledby="editor-tab-${editorMode}">${page ? pageDetail(page, p) : ''}</div>${rail}</div>${page ? imageCopyPanel(page, p) : ''}<div class="project-actionbar"><div><span class="section-index">02 / CREATE</span><span class="action-hint">${active ? `${done}/${pages.length} 张已完成，请保持服务运行` : state.dirty ? (imageEdits ? '图片内文字有修改，保存后可重新生成' : '帖子内容有修改，保存即可更新') : p.status === 'completed' ? '作品已就绪，点击图片可查看大图' : '确认文案后，开始生成图片'}</span></div><div class="action-buttons">${editable ? `<button class="button button-secondary" data-action="save" ${state.busy ? 'disabled' : ''}>${buttonBusy('save') || icon('check')}保存方案</button>` : ''}${done && !active ? `<a class="button ${p.status === 'completed' ? 'button-ink' : 'button-secondary'}" href="/api/projects/${encodeURIComponent(p.id)}/export.zip" download>${icon('download')}打包下载</a>` : ''}${!active ? `<button class="button button-primary" data-action="generate" ${state.busy || (done === pages.length && !imageEdits) ? 'disabled' : ''}>${buttonBusy('generate') || icon('spark')}${done === pages.length && !imageEdits ? '全部已生成' : state.dirty ? '保存并生成图片' : done ? '生成剩余图片' : '开始生成图片'}</button>` : `<button class="button button-primary" disabled><span class="spinner spinner-small"></span>正在生成图片</button>`}</div></div>` : `<div class="failed-empty">${icon('alert')}<h3>${p.status === 'interrupted' ? '任务已中断' : '暂时没有生成方案'}</h3><p>请检查模型配置和错误信息，然后重试内容分析。</p><button class="button button-primary" data-action="reanalyze" ${state.busy ? 'disabled' : ''}>${icon('refresh')}重新分析内容</button></div>`;
-  return `<div class="project-panel"><div class="project-heading"><div class="project-subline"><span class="project-meta">${h(modeText(p.mode))} · ${h(p.aspect)}${pages.length ? ` · ${pages.length} 张` : ''}</span><span>${time(p.createdAt)} 创建</span><span class="dirty-status ${state.dirty ? 'visible' : ''}" id="dirty-status">有未保存的修改</span>${pages.length ? `<span class="completion-count">${done}/${pages.length} 张已生成</span>` : ''}</div></div>${p.error ? `<div class="project-error">${icon('alert')}<span>${h(p.error)}</span></div>` : ''}${content}${logsPanel(p)}</div>`;
-}
-
-function analysisState(p) {
-  return `<div class="analysis-state"><div class="analysis-orb">${icon('spark')}</div><h3>正在把你的想法整理成方案</h3><p>理解内容、梳理结构、设计逐页文案与画面提示词…</p><div class="analysis-progress"><span></span></div><small>文本模型正在处理中，完成后会自动展示。</small></div>`;
-}
-function pageDetail(page, project) {
-  const editable = canEdit(project);
-  const index = (state.draft?.pages || project.pages || []).findIndex(p => p.id === page.id);
-  const image = page.imageUrl ? `<button class="image-preview" data-action="preview" data-id="${h(page.id)}" data-aspect="${h(project.aspect)}" aria-label="查看第 ${index+1} 页完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title || '生成的图文作品')}"/><span>${icon('expand')}点击查看大图</span></button>` : page.status === 'generating' ? `<div class="image-generating" data-aspect="${h(project.aspect)}"><span class="spinner"></span><strong>正在绘制第 ${index+1} 张</strong><p>图片生成可能需要几分钟，请耐心等待。</p></div>` : `<div class="image-generating image-pending" data-aspect="${h(project.aspect)}">${icon('image')}<span class="section-index">PAGE ${String(index+1).padStart(2,'0')}</span><strong>${h(page.title)}</strong><p>${page.status === 'error' ? '这张图片尚未完成，可以单独重试。' : '确认内容方案后，生成这页的图文。'}</p><span class="pending-note">图片尚未生成</span></div>`;
-  return `<div class="detail-topbar"><span class="detail-page-label">PAGE ${String(index + 1).padStart(2,'0')}</span><div>${page.imageUrl ? `<a class="icon-button" title="下载这张图片" aria-label="下载这张图片" href="${h(page.imageUrl)}" download="${h(project.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}">${icon('download')}</a><button class="icon-button" title="查看大图" aria-label="查看大图" data-action="preview" data-id="${h(page.id)}">${icon('expand')}</button>` : ''}${editable ? `<button class="text-button" data-action="regenerate" data-id="${h(page.id)}" ${state.busy ? 'disabled' : ''}>${icon('refresh')}${page.imageUrl ? '重新生成' : page.status === 'error' ? '重试这张' : '生成这张'}</button>` : ''}</div></div>${page.error ? `<div class="inline-error">${h(page.error)}</div>` : ''}<div class="page-content-layout"><section class="page-visual-panel" aria-label="第 ${index+1} 页图片"><div class="preview-stage">${image}</div><p class="page-visual-caption">${page.imageUrl ? '点击图片查看大图' : page.status === 'generating' ? '图片完成后会展示在这里' : '确认文案后，生成这页图片'}</p></section>${captionPanel(state.draft || project, editable)}</div>`;
-}
-function captionPanel(p, editable) {
-  return `<section class="page-copy-panel post-copy-panel" aria-label="帖子内容文案"><div class="page-copy-heading"><span class="eyebrow">POST CONTENT</span><textarea id="post-title" class="post-title-input" aria-label="帖子标题" data-edit="project-title" rows="2" maxlength="200" placeholder="填写帖子标题" ${!editable ? 'disabled' : ''}>${h(p.title)}</textarea></div><div class="post-copy-toolbar"><label class="field-label" for="post-caption">帖子正文</label><button type="button" class="text-button" data-action="copy-caption">${icon('copy')}复制文案</button></div><textarea id="post-caption" aria-label="帖子文案" data-edit="caption" rows="14" maxlength="12000" placeholder="在这里编辑发布帖子的正文和话题标签…" ${!editable ? 'disabled' : ''}>${h(p.caption)}</textarea><p class="field-help">发布时配在图片旁边的内容。修改这里不会改变图片内的文字。</p></section>`;
-}
-function imageCopyPanel(page, project) {
-  const editable = canEdit(project);
-  const index = (state.draft?.pages || project.pages || []).findIndex(p => p.id === page.id);
-  const editor = `<div class="page-editor ${page.imageUrl ? 'has-image' : ''}"><label class="field-label" for="page-title">标题</label><input id="page-title" data-edit="title" data-page="${h(page.id)}" value="${h(page.title)}" ${!editable ? 'disabled' : ''}/><label class="field-label" for="page-content">正文</label><textarea id="page-content" data-edit="content" data-page="${h(page.id)}" rows="6" ${!editable ? 'disabled' : ''}>${h(page.content)}</textarea><p class="field-help">这里的文字会出现在图片中。修改后，保存并重新生成即可更新画面。</p></div>`;
-  const advanced = `<details class="advanced-settings prompt-details"><summary>高级设置 <span>画面提示词</span></summary><div class="advanced-settings-body"><label class="field-label" for="page-prompt">画面提示词</label><textarea id="page-prompt" aria-label="画面提示词" class="prompt-input" data-edit="prompt" data-page="${h(page.id)}" rows="6" ${!editable ? 'disabled' : ''}>${h(page.prompt)}</textarea><p class="field-help">需要调整构图、配色或细节时再修改。图片中的文字仍以标题和正文为准。</p></div></details>`;
-  return `<details class="image-copy-panel" open><summary><span>图片内文字</span><small>第 ${index+1} 页 · 标题与正文</small></summary>${editor}${advanced}</details>`;
-}
-
-function logsPanel(p) {
-  if (!p.logs?.length) return '';
-  return `<details class="logs-panel"><summary>任务动态<span>${p.logs.length} 条记录</span></summary><div class="log-list">${p.logs.slice(-25).reverse().map(log => `<div><time>${time(log.at)}</time><span>${h(log.message)}</span></div>`).join('')}</div></details>`;
-}
-
 const TREND_PLATFORMS = [{id:'weibo',name:'微博',mark:'微'},{id:'douyin',name:'抖音',mark:'抖'},{id:'xiaohongshu',name:'小红书',mark:'红'}];
 const trendName = id => TREND_PLATFORMS.find(p=>p.id===id)?.name||'来源平台';
 const trendUrl = value => {try{const url=new URL(value);return ['http:','https:'].includes(url.protocol)?url.href:'';}catch{return '';}};
@@ -500,14 +650,13 @@ async function saveTrendKeywords() {
   await saveTrendsSettings({keywords},'keywords');
 }
 function useTrendForCreation(id) {
-  if(state.guideBusy)return notify('创作对话正在分析，请等它完成后再带入热点。');
+  if(state.guideBusy||guideWorkActive())return notify('当前创作正在处理中，请等它完成后再带入热点。');
   const item=[...(state.trends?.memes||[]),...(state.trends?.items||[])].find(item=>item.id===id);if(!item)return;
   if(!guideTrendUsable(item))return notify('这个热梗已过留存期，请更新榜单或选择其他话题。',true);
-  if(state.dirty&&!confirm('创作台有未保存的修改。先进入创作对话选题？原方案会保留。'))return;
   const g=state.guide, p=trendSource(item.platform), url=trendUrl(item.url),sourceUpdatedAt=item.sourceUpdatedAt||p.sourceUpdatedAt;
   const input=`我想围绕「${item.title}」创作图文，请先帮我分析适合的内容方向，再问我风格、比例和图片张数。\n\n选题线索：${trendName(item.platform)}${item.kind==='meme'?'热梗候选':'热榜话题'}，${item.kind==='meme'&&!item.inCurrentBoard?'最近采集榜内':'榜内'}第 ${item.rank} 位。\n${url?'原内容链接：'+url+'\n':''}采集时间：${trendTime(item.fetchedAt)}（北京时间）。\n榜单源更新时间：${sourceUpdatedAt?trendTime(sourceUpdatedAt)+'（北京时间）':'未知，采集时间不代表榜单新鲜度'}。${p.status==='stale'?'\n注意：当前是缓存或延迟榜单，请先确认时效。':''}\n\n${item.kind==='meme'?`这是热梗候选，本机首次收录 ${trendTime(item.firstSeenAt)}，保留至 ${trendTime(item.expiresAt)}；14 天是本机留存窗口，不代表持续火爆。\n`:''}这只是热榜标题线索。请提醒我补充或核实原内容，不要凭标题编造事实、热梗含义或出处。`;
-  if((g.messages.length||g.source||g.input.trim())&&!confirm('把这个热点作为新话题带入创作对话？当前对话及未发送的文字会替换，作品记录会保留。'))return;
-  guideRequestVersion++;state.guide=blankGuidance();state.guide.input=input;state.guideEdit=null;saveGuidance();state.view='briefing';render();
+  if((g.messages.length||g.source||g.input.trim()||g.draftImages.length)&&!confirm('把这个热点作为新话题带入创作对话？当前对话及未发送的文字和图片会替换，作品记录会保留。'))return;
+  guideRequestVersion++;guideCreationVersion++;guideProjectPollVersion++;clearTimeout(guideProjectPollTimer);state.guideProject=null;state.guide=blankGuidance();state.guide.input=input;state.guideEdit=null;resetGuideStyleFilters();saveGuidance();state.view='briefing';render();
   document.querySelector('#guide-input')?.focus();notify('选题已带入。补充你的想法，再点击“开始聊聊”。');
 }
 
@@ -518,12 +667,12 @@ function historyList() {
   const query = state.search.trim().toLowerCase();
   const list = state.projects.filter(p => (state.filter === 'all' || p.status === state.filter) && (!query || `${p.title} ${p.source}`.toLowerCase().includes(query))).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
   if (!list.length) return `<div class="history-empty">${icon('cards')}<h3>${state.search || state.filter !== 'all' ? '没有找到匹配的作品' : '你的作品，会从这里开始积累'}</h3><p>${state.search || state.filter !== 'all' ? '试试其他关键词或筛选条件。' : '从一个想法开始，创作第一组图文。'}</p><button class="button button-primary" data-action="new">${icon('plus')}开始创作</button></div>`;
-  return `<div class="history-grid">${list.map(p => {const cover=p.pages?.find(page => page.imageUrl); return `<article class="history-card"><button class="history-cover" data-action="open-project" data-id="${h(p.id)}">${cover ? `<img src="${h(cover.imageUrl)}" alt="${h(p.title)}" loading="lazy"/>` : `<div class="history-placeholder">${icon('cards')}<span>${h(modeText(p.mode))}</span></div>`}<span class="badge badge-${h(p.status)}">${statusText(p.status)}</span></button><div class="history-card-body"><button class="history-title" data-action="open-project" data-id="${h(p.id)}">${h(p.title || '未命名作品')}</button><p>${h(p.source?.slice(0,90))}</p><div class="history-card-footer"><span>${time(p.createdAt)} · ${p.pages?.length || p.count || 0} 张</span><button class="icon-button" aria-label="删除 ${h(p.title)}" title="删除作品" data-action="delete" data-id="${h(p.id)}" ${isActive(p) ? 'disabled' : ''}>${icon('trash')}</button></div></div></article>`;}).join('')}</div>`;
+  return `<div class="history-grid">${list.map(p => {const cover=p.pages?.find(page => page.imageUrl); return `<article class="history-card"><button class="history-cover" data-action="open-project" data-id="${h(p.id)}">${cover ? `<img src="${h(cover.imageUrl)}" alt="${h(p.title)}" loading="lazy"/>` : `<div class="history-placeholder">${icon('cards')}<span>${h(modeText(p.mode))}</span></div>`}<span class="badge badge-${h(p.status)}">${statusText(p.status)}</span></button><div class="history-card-body"><button class="history-title" data-action="open-project" data-id="${h(p.id)}">${h(p.title || '未命名作品')}</button><p>${h(p.source?.slice(0,90))}</p><div class="history-card-footer"><span>${time(p.createdAt)} · ${p.pages?.length || p.count || 0} 张</span><button class="icon-button" aria-label="删除 ${h(p.title)}" title="删除作品" data-action="delete" data-id="${h(p.id)}" ${isActive(p) ? 'disabled' : ''}>${icon('trash')}</button></div><button class="text-button history-continue-chat" data-action="continue-chat" data-id="${h(p.id)}">${isActive(p)?'查看进度':p.pages?.length?'继续对话':'查看并继续'} ${icon('arrow')}</button></div></article>`;}).join('')}</div>`;
 }
 function settingsView() {
   if (!state.config) return `<div class="panel settings-loading"><span class="spinner"></span><p>正在读取模型设置…</p><button class="button button-secondary" data-action="reload">重试连接</button></div>`;
   const c=state.config;
-  return `<div class="settings-layout"><form id="settings-form" class="settings-form"><div class="settings-intro">${icon('lock')}<div><strong>使用你自己的模型资源</strong><p>文本模型负责内容策划，图片模型负责出图，可以使用不同的中转站。</p></div></div>${providerSettings('text','文本模型','内容分析、拆页和提示词生成',c.text)}${providerSettings('image','图片模型','根据提示词生成真实图片',c.image)}<div class="settings-save"><p>密钥保存后不会返回浏览器，留空表示保留已保存的密钥。</p><button class="button button-primary" type="submit" ${state.busy ? 'disabled' : ''}>${buttonBusy('settings') || icon('check')}保存模型设置</button></div></form><aside class="settings-aside"><div class="panel"><span class="eyebrow">QUICK START</span><h3>连接模型，只需三步</h3><ol><li><strong>填写 API 地址</strong><p>一般填到 /v1，例如 https://api.example.com/v1，以中转站文档为准。</p></li><li><strong>填写模型 ID 与密钥</strong><p>使用中转站提供的准确模型名；文本与图片模型可共用一个密钥，但需分别填写。</p></li><li><strong>保存后测试连接</strong><p>测试会发送真实请求，可能产生少量费用。通过后即可回到创作台。</p></li></ol></div><div class="settings-tip">${icon('file')}<p>作品、内容方案和任务记录保存在本地。图片中的中文与细节仍需人工检查。</p></div></aside></div>`;
+  return `<div class="settings-layout"><form id="settings-form" class="settings-form"><div class="settings-intro">${icon('lock')}<div><strong>使用你自己的模型资源</strong><p>文本模型负责内容策划，图片模型负责出图，可以使用不同的中转站。</p></div></div>${providerSettings('text','文本模型','内容分析、拆页和提示词生成',c.text)}${providerSettings('image','图片模型','根据提示词生成真实图片',c.image)}<div class="settings-save"><p>密钥保存后不会返回浏览器，留空表示保留已保存的密钥。</p><button class="button button-primary" type="submit" ${state.busy ? 'disabled' : ''}>${buttonBusy('settings') || icon('check')}保存模型设置</button></div></form><aside class="settings-aside"><div class="panel"><span class="eyebrow">QUICK START</span><h3>连接模型，只需三步</h3><ol><li><strong>填写 API 地址</strong><p>一般填到 /v1，例如 https://api.example.com/v1，以中转站文档为准。</p></li><li><strong>填写模型 ID 与密钥</strong><p>使用中转站提供的准确模型名；文本与图片模型可共用一个密钥，但需分别填写。</p></li><li><strong>保存后测试连接</strong><p>测试会发送真实请求，可能产生少量费用。通过后即可回到创作对话。</p></li></ol></div><div class="settings-tip">${icon('file')}<p>作品、内容方案和任务记录保存在本地。图片中的中文与细节仍需人工检查。</p></div></aside></div>`;
 }
 function providerSettings(kind,title,description,c = {}) {
   const isImage=kind==='image';
@@ -536,36 +685,54 @@ function providerSettings(kind,title,description,c = {}) {
 app.addEventListener('input', event => {
   const el=event.target;
   if(el.id==='guide-input') {state.guide.input=el.value;saveGuidance();}
-  if(el.id==='source') {state.brief.source=el.value; const counter=document.querySelector('#source-count'); if(counter) counter.textContent=el.value.length;}
+  if(el.id==='guide-style-search'){state.guideStyleSearch=el.value;updateGuideStyleResults();}
   if(el.id==='trends-search'){state.trendSearch=el.value;state.trendLimit=24;updateTrendsResults();}
   if(el.id==='trends-keywords'){state.trendKeywordsDraft=el.value;state.trendKeywordsDirty=true;}
   if(el.id==='history-search') {state.search=el.value;document.querySelector('#history-list').innerHTML=historyList();}
-  if(el.closest('#brief-form') && ['style','aspect','count'].includes(el.name)) state.brief[el.name]=el.name==='count'?Math.max(1,Math.min(10,Number(el.value)||1)):el.value;
-  if(el.dataset.edit && state.draft && canEdit(state.project)) {
-    if(el.dataset.edit==='project-title') {state.draft.title=el.value;document.querySelectorAll('[data-edit="project-title"]').forEach(other=>{if(other!==el)other.value=el.value;});}
-    else if(el.dataset.edit==='caption') state.draft.caption=el.value;
-    else {const page=state.draft.pages.find(p=>p.id===el.dataset.page);if(page)page[el.dataset.edit]=el.value;}
-    state.dirty=true;
-    document.querySelector('#dirty-status')?.classList.add('visible');
-    const briefSubmit=document.querySelector('#brief-form [type="submit"]');
-    if(briefSubmit){briefSubmit.classList.remove('button-secondary');briefSubmit.classList.add('button-primary');}
-    const generateButton=document.querySelector('[data-action="generate"]');
-    if(generateButton&&!state.busy){const allDone=state.project.pages.every(page=>page.status==='done')&&!hasImageEdits();generateButton.disabled=allDone;generateButton.innerHTML=`${icon('spark')}${allDone?'全部已生成':'保存并生成图片'}`;}
-  }
 });
-app.addEventListener('change', event => {
+app.addEventListener('paste', event => {
+  if(!event.target.closest('#guide-form'))return;
+  const files=Array.from(event.clipboardData?.files||[]);
+  if(!files.length)return;
+  event.preventDefault();
+  const input=document.querySelector('#guide-input'),text=event.clipboardData?.getData('text/plain')||'';
+  if(input&&!input.disabled&&text){
+    const start=input.selectionStart??input.value.length,end=input.selectionEnd??start;
+    const room=Math.max(0,input.maxLength-(input.value.length-(end-start)));
+    input.setRangeText(text.slice(0,room),start,end,'end');state.guide.input=input.value;saveGuidance();
+  }
+  addGuideImages(files);
+});
+app.addEventListener('dragover', event => {
+  if(!Array.from(event.dataTransfer?.types||[]).includes('Files'))return;
+  event.preventDefault();
+  const form=event.target.closest('#guide-form');
+  document.querySelector('#guide-form')?.classList.toggle('is-dragging',Boolean(form));
+  if(event.dataTransfer)event.dataTransfer.dropEffect=form?'copy':'none';
+});
+app.addEventListener('dragleave', event => {
+  const form=event.target.closest('#guide-form');
+  if(form&&!form.contains(event.relatedTarget))form.classList.remove('is-dragging');
+});
+app.addEventListener('drop', event => {
+  const files=Array.from(event.dataTransfer?.files||[]);
+  if(!files.length)return;
+  event.preventDefault();document.querySelector('#guide-form')?.classList.remove('is-dragging');
+  if(event.target.closest('#guide-form'))addGuideImages(files);
+  else notify('把产品图片拖进聊天输入框即可。');
+});
+app.addEventListener('change', async event => {
   const el=event.target;
+  if(el.id==='guide-image-input'){const files=Array.from(el.files||[]);el.value='';await addGuideImages(files);}
   if(el.id==='guide-match-trends'){
     state.guide.matchTrends=el.checked;state.guide.selectedTrend=null;state.guide.trendMatches=null;state.guide.trendNotice=el.checked?'已开启热点匹配。下次发送分析时会一起匹配，也可以点击重新匹配。':'已关闭热点匹配，将按原主题继续。';saveGuidance();renderGuidance();
   }
   if(el.id==='trends-interval')state.trendIntervalDraft=Number(el.value);
-  if(el.name==='mode') {state.brief.mode=el.value;render();}
 });
 app.addEventListener('submit', async event => {
   event.preventDefault();
   if(event.target.id==='trends-keywords-form')await saveTrendKeywords();
   if(event.target.id==='guide-form') await sendGuidance();
-  if(event.target.id==='brief-form') await createProject();
   if(event.target.id==='settings-form') await saveSettings();
 });
 app.addEventListener('click', async event => {
@@ -574,20 +741,37 @@ app.addEventListener('click', async event => {
   event.preventDefault();
   const {action,id,view,kind}=button.dataset;
   try {
+    if(state.guideUploadBusy&&['navigate','guide-new','guide-reset','new','continue-chat','open-project','trends-use','delete'].includes(action))return notify('图片正在放入消息，完成后再切换。');
+    if(action==='guide-image-add')document.querySelector('#guide-image-input')?.click();
+    if(action==='guide-image-remove'){
+      if(state.guideUploadBusy||state.guideBusy)return;
+      state.guide.draftImages=state.guide.draftImages.filter(image=>image.id!==id);state.guide.attachmentError='';saveGuidance();renderGuidance({preserve:true});
+    }
+    if(action==='guide-reference-preview'){
+      const found=[...state.guide.draftImages,...state.guide.referenceImages,...state.guide.messages.flatMap(message=>normalizeGuideImages(message.images)),...normalizeGuideImages(state.guide.creation?.lastChatRequest?.images),...(state.guideProject?.chatMessages||[]).flatMap(message=>normalizeGuideImages(message.referenceImages||message.images))].find(image=>image.id===id);
+      if(found){document.querySelector('#lightbox-image').src=found.url;lightbox.showModal();}
+    }
     if(action==='guide-example') {const examples=['给新手做一组养猫准备清单','把产品介绍做成一组宣传图','做一张 AI 工作流知识图'];state.guide.input=examples[Number(button.dataset.example)]||'';saveGuidance();renderGuidance();document.querySelector('#guide-input')?.focus();}
     if(action==='guide-choice') chooseGuidePreference(button.dataset.field,button.dataset.value);
+    if(action==='guide-style-category'){const category=button.dataset.category;if(category!=='all'&&!STYLE_CATEGORIES.includes(category))return;state.guideStyleCategory=category;updateGuideStyleResults();}
+    if(action==='guide-style-clear'){resetGuideStyleFilters();const search=document.querySelector('#guide-style-search');if(search)search.value='';updateGuideStyleResults();search?.focus();}
     if(action==='guide-count') {const input=document.querySelector('#guide-custom-count');if(input?.checkValidity())chooseGuidePreference('count',Number(input.value));else input?.reportValidity();}
     if(action==='guide-trend-select')chooseGuideTrend(id);
     if(action==='guide-trend-clear')clearGuideTrend();
     if(action==='guide-trend-rematch')await sendGuidance({rematch:true});
-    if(action==='guide-from-studio')await matchTrendsFromStudio();
-    if(action==='guide-accept') acceptGuideRecommendations();
-    if(action==='guide-edit') {state.guideEdit=button.dataset.field;renderGuidance();}
+    if(action==='guide-edit') {state.guideEdit=button.dataset.field;if(state.guideEdit==='style')resetGuideStyleFilters();renderGuidance();}
     if(action==='guide-cancel-edit') {state.guideEdit=null;renderGuidance();}
-    if(action==='guide-handoff') handoffGuidance();
+    if(action==='guide-create-retry')await recoverGuideCreation();
+    if(action==='guide-load-result')await loadGuideProject();
+    if(action==='guide-retry-images')await sendGuideProjectMessage({message:state.guideProject?.pages?.length?'重试失败图片，只处理未完成的图片，已完成的图片保持不变。':'重试这次创作，重新完成内容策划并生成图片。'});
+    if(action==='guide-chat-retry')await sendGuideProjectMessage({retry:true});
+    if(action==='guide-copy-result'){const p=state.guideProject;if(!p)return;await navigator.clipboard.writeText([p.title,p.caption].filter(Boolean).join('\n\n'));notify('帖子标题和文案已复制。');}
+    if(action==='guide-result-preview'){const page=state.guideProject?.pages?.find(page=>page.id===id);if(page?.imageUrl){document.querySelector('#lightbox-image').src=page.imageUrl;lightbox.showModal();}}
+    if(action==='guide-new')resetGuideConversation();
+    if(action==='continue-chat')await resumeProjectInGuide(id);
     if(action==='guide-retry') await sendGuidance({retry:true});
-    if(action==='guide-reset') {if(state.guideBusy)return;if(state.guide.messages.length&&!confirm('重新开始创作对话？当前对话和已选参数将清空，作品记录不会受影响。'))return;guideRequestVersion++;state.guide=blankGuidance();state.guideEdit=null;saveGuidance();renderGuidance();}
-    if(action==='navigate') {if(!['briefing','studio','trends','history','settings'].includes(view))return;state.view=view;render();if(view==='history')await refreshHistory();if(view==='trends')await loadTrends();}
+    if(action==='guide-reset')resetGuideConversation();
+    if(action==='navigate') {if(!['briefing','trends','history','settings'].includes(view))return;state.view=view;render();if(view==='history')await refreshHistory();if(view==='trends')await loadTrends();}
     if(action==='trends-refresh')await refreshTrends();
     if(action==='trends-platform'){state.trendPlatform=button.dataset.platform;state.trendLimit=24;renderTrends();}
     if(action==='trends-scope'){state.trendScope=button.dataset.scope;state.trendLimit=24;renderTrends();}
@@ -597,18 +781,8 @@ app.addEventListener('click', async event => {
     if(action==='trends-interval'){const interval=Number(document.querySelector('#trends-interval')?.value);await saveTrendsSettings({intervalMinutes:interval});}
     if(action==='trends-use')useTrendForCreation(id);
     if(action==='reload') await boot();
-    if(action==='new') {if(state.dirty&&!confirm('当前方案有未保存的修改，确定新建作品吗？'))return;if(state.guideBusy){state.view='briefing';render();return;}state.view='briefing';state.guide=blankGuidance();state.guideEdit=null;saveGuidance();state.project=null;state.draft=null;state.dirty=false;state.selectedPage=null;state.editorTab='outline';clearTimeout(pollTimer);pollVersion++;render();}
-    if(action==='sample') {state.brief.source='为刚开始接触 AI 的职场人，制作一组「让 AI 真正帮你省时间的 5 个方法」图文。\n\n内容包括：先说明任务和目标；提供必要背景与参考；把大任务拆成小步骤；让 AI 给出多个方案再做选择；对事实和关键数据进行检查。\n\n面向普通职场人，语言清晰实用，避免夸张承诺。每页一个方法，包含一个具体例子。最后给出今天就能尝试的小行动。';render();document.querySelector('#source')?.focus();}
-    if(action==='count') {state.brief.count=Math.max(1,Math.min(10,state.brief.count+Number(button.dataset.delta)));render();}
-    if(action==='select-page') {state.selectedPage=id;render();}
-    if(action==='editor-tab') {state.editorTab=button.dataset.tab==='preview'?'preview':'outline';render();}
-    if(action==='save') await saveProject();
-    if(action==='generate') await generate();
-    if(action==='regenerate') await generate(id);
-    if(action==='reanalyze') await reanalyze();
-    if(action==='preview') {const page=state.project?.pages.find(p=>p.id===id);if(page?.imageUrl){document.querySelector('#lightbox-image').src=page.imageUrl;lightbox.showModal();}}
-    if(action==='copy-caption') {const text=state.draft?.caption ?? state.project?.caption;if(!text?.trim())return notify('暂时没有可复制的文案。');await navigator.clipboard.writeText(text);notify('发布文案已复制。');}
-    if(action==='open-project') {if(state.dirty&&!confirm('当前方案有未保存的修改，确定切换作品吗？'))return;const {project}=await api(`/api/projects/${encodeURIComponent(id)}`);setProject(project,{reset:true});state.view='studio';render();beginPolling();}
+    if(action==='new') resetGuideConversation();
+    if(action==='open-project') await resumeProjectInGuide(id);
     if(action==='delete') await deleteProject(id);
     if(action==='filter') {state.filter=button.dataset.filter;render();}
     if(action==='load-models') await loadModels(kind);
@@ -617,41 +791,8 @@ app.addEventListener('click', async event => {
 });
 document.querySelector('#close-lightbox').addEventListener('click',()=>lightbox.close());
 lightbox.addEventListener('click',event=>{if(event.target===lightbox)lightbox.close();});
-window.addEventListener('beforeunload',event=>{if(state.dirty){event.preventDefault();event.returnValue='';}});
 app.addEventListener('keydown',event=>{if(event.target.id==='guide-input'&&(event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();sendGuidance();}});
 
-async function createProject() {
-  if(state.busy)return;
-  if(state.dirty&&!confirm('当前方案有未保存的修改，确定创建新作品吗？'))return;
-  const source=state.brief.source.trim();
-  if(source.length<5)return notify('请至少输入 5 个字，描述你的创作内容。',true);
-  state.busy='create';render();
-  try {
-    const {project}=await api('/api/projects',{method:'POST',body:{...state.brief,source,count:state.brief.mode==='cards'?state.brief.count:1}});
-    setProject(project,{reset:true});notify('创作任务已创建，正在生成内容方案。');
-  } catch(error){notify(error.message,true);} finally {state.busy='';render();beginPolling();}
-}
-async function saveProject({quiet=false}={}) {
-  if(!canEdit(state.project))return;
-  const p=state.draft;
-  const payload={title:p.title,caption:p.caption,pages:p.pages.map(({id,title,content,prompt})=>({id,title,content,prompt}))};
-  state.busy='save';render();
-  try {const {project}=await api(`/api/projects/${encodeURIComponent(p.id)}`,{method:'PATCH',body:payload});setProject(project,{reset:true});if(!quiet)notify('方案已保存。');return project;}
-  finally{state.busy='';render();}
-}
-async function generate(pageId) {
-  if(state.busy||!canEdit(state.project))return;
-  if(state.dirty)await saveProject({quiet:true});
-  state.busy='generate';render();
-  try {const {project}=await api(`/api/projects/${encodeURIComponent(state.project.id)}/generate`,{method:'POST',body:pageId?{pageId}:{}});setProject(project,{reset:true});notify('已开始生成图片，完成后会自动展示。');}
-  finally{state.busy='';render();beginPolling();}
-}
-async function reanalyze() {
-  if(state.busy||isActive(state.project))return;
-  state.busy='analyze';render();
-  try {const {project}=await api(`/api/projects/${encodeURIComponent(state.project.id)}/analyze`,{method:'POST',body:{}});setProject(project,{reset:true});}
-  finally{state.busy='';render();beginPolling();}
-}
 async function refreshHistory() {
   try {const {projects}=await api('/api/projects');state.projects=projects;if(state.view==='history')render();}
   catch(error){notify(error.message,true);}
@@ -662,7 +803,7 @@ async function deleteProject(id) {
   if(!confirm(`删除「${project?.title || '这份作品'}」及其生成文件？此操作无法恢复。`))return;
   await api(`/api/projects/${encodeURIComponent(id)}`,{method:'DELETE'});
   state.projects=state.projects.filter(p=>p.id!==id);
-  if(state.project?.id===id){state.project=null;state.draft=null;state.dirty=false;}
+  if(state.guide.creation?.projectId===id){const view=state.view;resetGuideConversation({confirmExisting:false});state.view=view;}
   render();notify('作品已删除。');
 }
 async function saveSettings() {
@@ -712,6 +853,12 @@ async function boot() {
   if(results[1].status==='fulfilled')state.projects=results[1].value.projects;
   else if(!state.bootError)state.bootError=results[1].reason.message;
   render();
+  if(state.guide.creation){
+    const c=state.guide.creation,project=state.projects.find(project=>project.id===c.projectId||project.creationRequestId===c.requestId);
+    if(project)setGuideProject(project);
+    if(c.projectId)await loadGuideProject({quiet:true});
+    else{c.error=c.error||'上次生成请求的结果尚未确认。点击确认上次请求结果，只查询已有作品，不会自动重新生成。';saveGuidance();renderGuidance({focusCreation:true});}
+  }
   if(state.view==='trends')await loadTrends();
 }
 boot();
