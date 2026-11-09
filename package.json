@@ -4,6 +4,16 @@
   "private": true,
   "type": "module",
   "description": "本地图文创作工作台，复用 baoyu-skills 内容与风格参考",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node server.mjs", "test": "node --test test/*.mjs", "check": "node --check server.mjs && node --check public/app.js" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.mjs",
+    "check": "node --check server.mjs && node --check public/app.js"
+  },
+  "dependencies": {
+    "nodemailer": "10.3.1",
+    "playwright-core": "1.65.0"
+  }
 }

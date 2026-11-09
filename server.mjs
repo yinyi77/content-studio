@@ -1,16 +1,22 @@
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
+import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { Storage, zip } from './lib/storage.mjs';
 import { styles, modes, planningMessages, renderingPrompt } from './lib/prompts.mjs';
 import { normalizeBase, textCompletion, parsePlan, listModels, generateImage } from './lib/providers.mjs';
 import { normalizeBriefRequest, briefingMessages, parseBriefingResponse } from './lib/briefing.mjs';
 import { TrendsService } from './lib/trends.mjs';
 import { buildTrendMatchContext } from './lib/trend-matching.mjs';
-import { normalizeCreationRequestId, normalizeProjectChatRequest, requestFingerprint, chatActionMessages, parseChatAction } from './lib/chat-creation.mjs';
+import { normalizeCreationRequestId, normalizeProjectChatRequest, requestFingerprint, chatActionMessages, parseChatAction, draftSaveIntent } from './lib/chat-creation.mjs';
 import { ReferenceImages, normalizeReferenceIds, withReferenceImages } from './lib/reference-images.mjs';
+import { RadarService } from './lib/radar.mjs';
+import { NotificationService } from './lib/notifications.mjs';
+import { DecisionLinks, decisionPage } from './lib/decision-links.mjs';
+import { XhsBrowser } from './lib/xhs-browser.mjs';
+import { XhsAccountService } from './lib/xhs-account.mjs';
+import { XhsDeliveryQueue, initialXhsDelivery } from './lib/xhs-delivery.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4318);
@@ -29,8 +35,26 @@ let mutationFinished = Promise.resolve();
 let briefRequests = 0;
 const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
 const allowedOrigins = new Set([...allowedHosts].map(x => `http://${x}`));
-const running = project => jobs.has(project.id);
+const running = project => jobs.has(project.id) || delivery.isProcessing(project);
 const ready = kind => Boolean(config[kind]?.baseUrl && config[kind]?.apiKey && config[kind]?.model);
+const notifications = new NotificationService({ dir: store.root });
+await notifications.init();
+const decisionLinks = new DecisionLinks({ dir: store.root });
+await decisionLinks.init();
+const radar = new RadarService({ dir: store.root, getTrends: () => trends.snapshot(),
+  refreshTrends: () => trends.refresh({ manual: false }),
+  complete: async messages => {
+    requireConfig('text');
+    try { return await textCompletion(structuredClone(config.text), messages); }
+    catch (error) { const safe = new Error(redact(error.message)); safe.status = error.status; throw safe; }
+  },
+  onNotify: async opportunities => { for (const opportunity of opportunities) await notifyRadarOpportunity(opportunity); } });
+await radar.init();
+const xhs = new XhsAccountService({ dir: store.root, driver: new XhsBrowser({ dir: store.root }) });
+await xhs.init();
+const delivery = new XhsDeliveryQueue({ store, xhs, prepare: prepareXhsDraft, modelBusy: id => jobs.has(id),
+  admit: work => serializeMutation(work, true), safe: message => redact(message) });
+await delivery.recover();
 function fail(message, status = 400) { const e = new Error(message); e.status = status; throw e; }
 function redact(value, max = 600) {
   let message = String(value || '操作失败');
@@ -49,6 +73,10 @@ function safeConfig() {
   return { text: expose('text'), image: expose('image'), styles, modes, configured: ready('text') && ready('image') };
 }
 function requireConfig(kind) { if (!ready(kind)) fail(`请先在模型设置中配置${kind === 'text' ? '文字' : '生图'}模型的地址、API Key 和模型名称`); }
+function validateXhsCopy(title, content) {
+  if (Array.from(title).length > 20) fail('小红书标题超过20个字符，请先在对话中缩短标题再存草稿');
+  if (Array.from(content).length > 1000) fail('小红书正文超过1000个字符，请先在对话中精简正文再存草稿');
+}
 const referenceMetadata = images => images.map(({ id, name, mime, size, url, sha256 }) => ({ id, name, mime, size, url, sha256 }));
 function jobCapacity() { if (jobs.size >= 2) fail('已有两个任务正在运行，请等待其中一个完成后再试', 429); }
 function ensureIdle(project) { if (running(project)) fail('作品正在处理，请等待任务完成', 409); }
@@ -72,6 +100,7 @@ async function analyze(project, { automatic = false } = {}) {
   const references = await referenceImages.resolve(project.referenceIds || []);
   const text = await textCompletion(snapshot, withReferenceImages(await planningMessages(project), references));
   const plan = parsePlan(text, project.mode === 'cards' ? project.count : 1);
+  if (project.xhsDelivery?.enabled) validateXhsCopy(plan.title, plan.caption);
   project.title = plan.title; project.caption = plan.caption;
   project.visualSystem = plan.visualSystem || null;
   project.planningNotes = plan.planningNotes ? redact(plan.planningNotes, 2000) : '';
@@ -107,6 +136,7 @@ async function render(project, pageId) {
   }
   const completed = project.pages.filter(page => page.status === 'done').length;
   project.status = completed === project.pages.length ? 'completed' : completed ? 'partial' : 'error';
+  if (project.status === 'completed') project.completedAt = new Date().toISOString();
   project.error = completed === project.pages.length ? null : '部分图片未完成，可查看页面错误并单独重试';
   log(project, `本次任务结束，已完成 ${completed}/${project.pages.length} 张`); await store.save(project);
 }
@@ -129,18 +159,44 @@ function beginChatRequest(project, { requestId, message, fingerprint, referenceI
   chatMessage(project, 'user', message, requestId, attachments.length ? { referenceImages: attachments } : {});
   return record;
 }
-async function finishChatRequest(project, record, reply, { error = null } = {}) {
+async function finishChatRequest(project, record, reply, { error = null, saveVersion = false } = {}) {
   record.status = error ? 'error' : 'completed'; record.completedAt = new Date().toISOString();
   record.reply = redact(reply, 2000); record.error = error ? redact(error) : null;
   project.chatStatus = error ? 'error' : 'idle'; project.chatError = record.error;
   chatMessage(project, 'assistant', record.reply, record.requestId, { action: record.action, status: record.status });
   await store.save(project);
+  // Delivery is detached from model jobs: a slow browser never turns completed
+  // creative work into a model error or consumes the model-job capacity.
+  if (!error) {
+    if (saveVersion) {
+      try { await delivery.enqueueVersion(project.id, { accountId: record.deliveryAccountId }); }
+      catch (failure) {
+        // Preserve the previous receipt: a rejected new-version request must
+        // never turn an already verified draft into a failed first delivery.
+        const latest = await store.get(project.id);
+        if (latest) {
+          const message = `图文已保留，本次未另存草稿：${redact(failure.message)}。`;
+          const saved = latest.chatRequests?.find(item => item.requestId === record.requestId);
+          if (saved) { saved.reply = message; saved.deliveryError = redact(failure.message); }
+          const assistant = latest.chatMessages?.findLast(item => item.requestId === record.requestId && item.role === 'assistant');
+          if (assistant) assistant.content = message;
+          await store.save(latest);
+        }
+      }
+    } else {
+      try { await delivery.afterCreative(project); }
+      catch (failure) { await delivery.update(project.id, { status: 'blocked', message: redact(failure.message) }); }
+    }
+  }
+  if (project.radarOpportunityId && record.requestId === project.creationRequestId) await notifyRadarResult(project);
 }
 function generationResult(project, pageIds) {
   const pages = pageIds ? project.pages.filter(page => pageIds.includes(page.id)) : project.pages;
   const done = pages.filter(page => page.status === 'done').length;
   return { failed: done !== pages.length, reply: done === pages.length
-    ? `已完成这次创作，${pages.length} 张图片已就绪。你可以直接告诉我需要调整哪部分。`
+    ? project.xhsDelivery?.enabled && project.xhsDelivery.status === 'waiting_generation'
+      ? `文案和 ${pages.length} 张图片已准备好，接下来自动存入本次绑定的小红书电脑草稿。`
+      : `已完成这次创作，${pages.length} 张图片已就绪。你可以直接告诉我需要调整哪部分。`
     : `本次完成 ${done}/${pages.length} 张，已有结果已保留。未完成图片可以直接告诉我“重试失败图片”。` };
 }
 function planningExplanation(project) {
@@ -167,19 +223,26 @@ async function modifyInChat(project, input, record) {
   const previousStatus = project.status;
   let imageWorkStarted = false;
   try {
+    const saveIntent = draftSaveIntent(input.message);
+    if (saveIntent?.only) {
+      record.action = 'save_draft'; project.chatAction = 'save_draft';
+      if (input.referenceIds.length) return await finishChatRequest(project, record, '这条消息附有新图片。请先说明要修改第几张，完成修改后再存入草稿。');
+      return await finishChatRequest(project, record, '已提交当前版本的电脑草稿任务，保存结果会显示在本对话中；已有草稿保留原来的内容。', { saveVersion: true });
+    }
     const references = await referenceImages.resolve(input.referenceIds.length ? input.referenceIds : project.referenceIds || []);
     const output = await textCompletion(structuredClone(config.text), withReferenceImages(chatActionMessages(project, input.message), references));
     const action = parseChatAction(output, project, input.message, { hasNewReferences: input.referenceIds.length > 0 });
     record.action = action.action; project.chatAction = action.action;
     if (action.action === 'reply') return await finishChatRequest(project, record, action.reply);
     if (action.action === 'update_post') {
+      if (project.xhsDelivery?.enabled) validateXhsCopy(action.title ?? project.title, action.caption ?? project.caption);
       const changed = [];
       if (action.title !== undefined && action.title !== project.title) changed.push('帖子标题');
       if (action.caption !== undefined && action.caption !== project.caption) changed.push('发布文案');
       if (action.title !== undefined) project.title = action.title;
       if (action.caption !== undefined) project.caption = action.caption;
       log(project, '已通过聊天更新帖子文案');
-      return await finishChatRequest(project, record, changed.length ? `已修改${changed.join('和')}。` : '帖子内容与当前版本一致，已保留现有内容。');
+      return await finishChatRequest(project, record, (changed.length ? `已修改${changed.join('和')}。` : '帖子内容与当前版本一致，已保留现有内容。') + (saveIntent ? '接下来将当前版本另存入电脑草稿，结果会显示在本对话中。' : ''), { saveVersion: Boolean(saveIntent) });
     }
     // Validate image access before changing any page or running a new plan.
     requireConfig('image');
@@ -210,7 +273,7 @@ async function modifyInChat(project, input, record) {
     log(project, `聊天修改已确认，将生成 ${action.pageIds.length} 张图片`);
     await store.save(project); await render(project, action.pageIds);
     const result = generationResult(project, action.pageIds);
-    await finishChatRequest(project, record, result.reply + (action.retryPlan ? planningExplanation(project) : ''), { error: result.failed ? project.error : null });
+    await finishChatRequest(project, record, result.reply + (action.retryPlan ? planningExplanation(project) : '') + (saveIntent && !result.failed ? '\n接下来将当前版本另存入电脑草稿。' : ''), { error: result.failed ? project.error : null, saveVersion: Boolean(saveIntent) });
   } catch (error) {
     project.status = imageWorkStarted ? 'error' : previousStatus;
     const message = redact(error.message);
@@ -286,34 +349,274 @@ function newProject(input) {
   const now = new Date().toISOString();
   return { id: randomUUID(), title: source.split('\n')[0].slice(0, 36), source, mode, style, aspect, count, caption: '', createdAt: now, updatedAt: now, status: 'analyzing', error: null, pages: [], logs: [] };
 }
+async function radarSnapshot() {
+  const snapshot = radar.snapshot(), notificationConfig = notifications.getSafeConfig();
+  const history = notifications.getHistory({ limit: 100 });
+  const relatedIds = new Set(snapshot.opportunities.map(item => item.projectId).filter(Boolean));
+  const projects = (await store.list()).filter(project => relatedIds.has(project.id));
+  const projectsSummary = Object.fromEntries(projects.map(project => {
+    const notice = history.find(item => item.kind === 'result' && item.entityId === project.id);
+    return [project.id, { id: project.id, title: project.title, status: project.status, chatStatus: project.chatStatus, running: running(project),
+      completed: project.pages.filter(page => page.status === 'done' && page.imageUrl).length, total: project.pages.length || project.count,
+      error: project.error ? redact(project.error) : '', resultNotification: notice ? { status: notice.status, error: notice.status === 'accepted' ? '' : notice.message } : null }];
+  }));
+  const checks = [
+    { id: 'profile', label: '产品介绍与真实卖点', ready: snapshot.profileReady, section: 'profile' },
+    { id: 'materials', label: '补充真实工具案例', ready: snapshot.profile.materials.length > 0, section: 'profile' },
+    { id: 'model', label: '文字与图片模型', ready: ready('text') && ready('image'), section: 'model' },
+    { id: 'notification', label: '选题通知已配置', ready: notificationConfig.configured, section: 'notifications' },
+    { id: 'schedule', label: '开启每日自动巡查', ready: snapshot.settings.enabled, section: 'schedule' },
+    { id: 'public-access', label: '填写手机决策地址', ready: Boolean(notificationConfig.publicBaseUrl && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(notificationConfig.publicBaseUrl).hostname)), section: 'notifications', optional: true },
+  ];
+  const beijingDay = value => { const ms = Date.parse(value); return Number.isFinite(ms) ? new Date(ms + 8 * 3600000).toISOString().slice(0, 10) : ''; };
+  const today = beijingDay(new Date().toISOString());
+  return { ...snapshot, notificationConfig, projectsSummary, notificationHistory: history.slice(0, 30),
+    readiness: { checks, ready: checks.filter(check => !check.optional).every(check => check.ready), setupMissing: checks.filter(check => !check.optional && !check.ready).map(check => check.label) },
+    today: { scans: (snapshot.runHistory || []).filter(run => beijingDay(run.startedAt) === today).length,
+      proposals: snapshot.opportunities.filter(item => beijingDay(item.createdAt) === today).length,
+      approved: snapshot.opportunities.filter(item => item.state === 'approved' && beijingDay(item.approvedAt) === today).length,
+      completed: projects.filter(project => project.status === 'completed' && beijingDay(project.completedAt || project.chatRequests?.find(record => record.requestId === project.creationRequestId)?.completedAt) === today).length } };
+}
+function decisionUrl(opportunity) {
+  const issued = decisionLinks.issue(opportunity);
+  const base = notifications.getSafeConfig().publicBaseUrl || `http://127.0.0.1:${port}`;
+  return { ...issued, url: new URL('/decision/' + issued.token, base).href };
+}
+async function notifyRadarOpportunity(opportunity) {
+  try {
+    const result = await notifications.sendOpportunity(opportunity, { decisionUrl: decisionUrl(opportunity).url });
+    await radar.setNotification(opportunity.id, { status: result.status, error: result.status === 'accepted' ? '' : result.message });
+  } catch (error) { await radar.setNotification(opportunity.id, { status: 'unknown', error: redact(error.message) }); }
+}
+async function notifyRadarResult(project) {
+  try {
+    const opportunity = radar.getOpportunity(project.radarOpportunityId);
+    await notifications.sendResult(project, { resultUrl: decisionUrl(opportunity).url });
+  } catch { /* Notification failures never change a saved creative result. */ }
+}
+async function createChatProject(input, { radarOpportunityId } = {}) {
+  const requestId = normalizeCreationRequestId(input?.requestId);
+  if (input.count !== undefined && (!Number.isInteger(input.count) || input.count < 1 || input.count > 10)) fail('图片张数应为 1 到 10 的整数');
+  const project = newProject(input);
+  const referenceIds = normalizeReferenceIds(input.referenceIds);
+  const references = await referenceImages.resolve(referenceIds);
+  if (referenceIds.length) { project.referenceIds = referenceIds; project.referenceImages = referenceMetadata(references); }
+  const fingerprint = requestFingerprint({ source: project.source, style: project.style, aspect: project.aspect, count: project.count, mode: project.mode,
+    ...(referenceIds.length ? { referenceImages: project.referenceImages.map(({ id, sha256 }) => ({ id, sha256 })) } : {}) });
+  const existing = (await store.list()).find(item => item.creationRequestId === requestId);
+  if (existing) {
+    if (existing.creationRequestFingerprint && existing.creationRequestFingerprint !== fingerprint) fail('这个 requestId 已用于其他创作要求，请使用新的请求编号', 409);
+    return existing;
+  }
+  requireConfig('text'); requireConfig('image'); jobCapacity();
+  project.creationRequestId = requestId; project.creationRequestFingerprint = fingerprint;
+  if (radarOpportunityId) project.radarOpportunityId = radarOpportunityId;
+  else if (!/(?:不要|先别|暂不|不需要).{0,6}(?:存|送|同步|上传).{0,6}(?:草稿|小红书)|(?:仅|只)生成[，,、\s]*(?:不要|不)上传/.test(project.source)) {
+    if (input.xhsAccountId !== undefined && input.xhsAccountId !== null && (typeof input.xhsAccountId !== 'string' || !/^[a-zA-Z0-9_-]{1,120}$/.test(input.xhsAccountId))) fail('目标小红书账号格式不正确');
+    project.xhsDelivery = initialXhsDelivery(xhs.snapshot(), input.xhsAccountId);
+  }
+  project.chatStatus = 'analyzing';
+  const record = beginChatRequest(project, { requestId, message: project.source, fingerprint, referenceImages: project.referenceImages }, 'create');
+  await store.save(project); launch(project, item => createInChat(item, record));
+  return project;
+}
+async function approveRadarOpportunity(id) {
+  let opportunity = radar.getOpportunity(id);
+  const existing = opportunity.projectId ? await store.get(opportunity.projectId) : (await store.list()).find(item => item.creationRequestId === opportunity.requestId);
+  if (existing) {
+    if (existing.creationRequestId !== opportunity.requestId) fail('选题与创作记录不一致，请检查作品记录', 409);
+    await radar.markApproved(id, existing.id, { recovery: true });
+    return existing;
+  }
+  if (opportunity.projectId || opportunity.state === 'approved') fail('该选题关联的作品已不存在，不会自动重复生成', 409);
+  opportunity = await radar.validateOpportunity(id);
+  const project = await createChatProject({ requestId: opportunity.requestId, source: opportunity.source, ...opportunity.spec, referenceIds: opportunity.referenceIds }, { radarOpportunityId: id });
+  await radar.markApproved(id, project.id);
+  return project;
+}
+async function serializeMutation(work, wait = true) {
+  if (wait) while (mutationInFlight) await mutationFinished;
+  else if (mutationInFlight) fail('另一个操作正在保存，请稍后重试', 409);
+  mutationInFlight = true; let finish;
+  mutationFinished = new Promise(resolve => { finish = resolve; });
+  try { return await work(); } finally { mutationInFlight = false; finish(); }
+}
+function publicDecisionOrigin() {
+  const base = notifications.getSafeConfig().publicBaseUrl;
+  return base ? new URL(base).origin : null;
+}
+async function decisionContext(token) {
+  const payload = decisionLinks.verify(token);
+  const opportunity = radar.snapshot().opportunities.find(item => item.id === payload.id) || radar.getOpportunity(payload.id);
+  decisionLinks.verify(token, opportunity);
+  const project = opportunity.projectId ? await store.get(opportunity.projectId) : null;
+  if (project && project.creationRequestId !== opportunity.requestId) fail('提案关联记录不一致', 409);
+  return { opportunity, project };
+}
+async function decisionRoute(req, res, match) {
+  const [, token, action, filename] = match;
+  let { opportunity, project } = await decisionContext(token);
+  res.setHeader('Cache-Control', 'no-store');
+  if (action === 'media') {
+    if (!['GET', 'HEAD'].includes(req.method)) fail('图片仅支持查看', 405);
+    if (!filename || !project?.pages?.some(page => page.imageUrl && path.basename(page.imageUrl) === filename)) fail('图片不存在', 404);
+    const bytes = await readFile(path.join(store.dir(project.id), 'images', filename));
+    res.writeHead(200, { 'Content-Type': types[path.extname(filename)] || 'application/octet-stream', 'Content-Length': bytes.length });
+    return res.end(req.method === 'HEAD' ? undefined : bytes);
+  }
+  let message = '', error = '', status = 200;
+  if (action) {
+    if (req.method !== 'POST') fail('批准或跳过需在页面内点击确认', 405);
+    if (!String(req.headers['content-type'] || '').startsWith('application/x-www-form-urlencoded')) fail('请从决策页面提交操作', 415);
+    let raw = '', length = 0;
+    for await (const chunk of req) { length += chunk.length; if (length > 8192) fail('操作数据过长', 413); raw += chunk; }
+    const form = new URLSearchParams(raw);
+    decisionLinks.verifyCsrf(token, form.get('csrf'));
+    try {
+      await serializeMutation(async () => {
+        // Recheck after acquiring the same lock used by local API mutations.
+        ({ opportunity, project } = await decisionContext(token));
+        if (action === 'approve') { project = await approveRadarOpportunity(opportunity.id); message = '已批准，后台正在准备图文。稍后刷新本页查看结果。'; }
+        else { await radar.skipOpportunity(opportunity.id, { reason: form.get('reason') || '', note: form.get('note') || '' }); message = '已跳过这条提案，反馈会用于后续选题。'; }
+        opportunity = radar.getOpportunity(opportunity.id);
+      });
+    } catch (failure) { error = redact(failure.message); status = failure.status || 400; }
+  } else if (!['GET', 'HEAD'].includes(req.method)) fail('不支持的请求', 405);
+  const nonce = randomBytes(18).toString('base64');
+  res.setHeader('Content-Security-Policy', `default-src 'none'; img-src 'self' data:; style-src 'nonce-${nonce}'; script-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'`);
+  const content = Buffer.from(decisionPage({ opportunity, project, token, csrf: decisionLinks.csrf(token), nonce, message, error }));
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': content.length });
+  return res.end(req.method === 'HEAD' ? undefined : content);
+}
+async function prepareXhsDraft(input, { allowDeliveryJob = false } = {}) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) fail('请先选择要送入小红书的作品');
+  const accountId = str(input.accountId, '目标小红书账号', 200);
+  const connected = xhs.snapshot();
+  if (!connected.account?.id || connected.connection?.state !== 'connected') fail('请先连接并检查小红书账号', 409);
+  if (connected.account.id !== accountId) fail('小红书账号已变化，请重新选择作品并确认目标账号', 409);
+  const project = await projectById(input.projectId);
+  if (!allowDeliveryJob) ensureIdle(project);
+  else if (jobs.has(project.id) || ['thinking', 'analyzing', 'generating'].includes(project.chatStatus)) fail('创作任务仍在处理中，请等待完成', 409);
+  if (project.status !== 'completed' || !Array.isArray(project.pages) || !project.pages.length || project.pages.length > 18 || project.pages.some(page => page.status !== 'done' || !page.imageUrl)) fail('请等整组图片全部生成完成后再送入草稿', 409);
+  const title = str(input.title ?? project.title, '小红书标题', 200);
+  const content = str(input.content ?? project.caption, '小红书正文', 12000, true);
+  validateXhsCopy(title, content);
+  const directory = await realpath(path.join(store.dir(project.id), 'images'));
+  const images = [], imageHashes = [];
+  for (const page of project.pages) {
+    const match = page.imageUrl.match(/^\/media\/([0-9a-f-]{36})\/([0-9a-f-]{36}-[0-9a-f-]{36}\.(?:png|jpg|webp|gif))$/);
+    if (!match || match[1] !== project.id) fail('作品图片记录无效，请在作品对话中重新检查', 409);
+    if (/\.gif$/i.test(match[2])) fail('电脑草稿首版支持PNG、JPEG和WebP静态图片，请替换GIF后再送入');
+    const image = await realpath(path.join(directory, match[2]));
+    if (path.dirname(image) !== directory) fail('作品图片不在本机作品目录中', 409);
+    const bytes = await readFile(image);
+    if (!bytes.length || bytes.length > 30 * 1024 * 1024) fail('图片文件为空或超过30MB，请重新生成或压缩后再试');
+    images.push(image); imageHashes.push(createHash('sha256').update(bytes).digest('hex'));
+  }
+  const fingerprint = createHash('sha256').update(JSON.stringify({ accountId, projectId: project.id, title, content, imageHashes })).digest('hex');
+  return { accountId, projectId: project.id, title, content, images, fingerprint };
+}
 async function api(req, res, url) {
   const method = req.method, pathname = url.pathname;
+  if (pathname === '/api/xhs') {
+    if (method !== 'GET') fail('账号工作台仅支持读取', 405);
+    return send(res, 200, xhs.snapshot());
+  }
+  const xhsAction = pathname.match(/^\/api\/xhs\/(login|check|sync|open-drafts|disconnect)$/);
+  if (xhsAction) {
+    if (method !== 'POST') fail('小红书账号操作仅支持 POST', 405);
+    await body(req);
+    const action = { login: 'startLogin', check: 'checkLogin', sync: 'startSync', 'open-drafts': 'openDrafts', disconnect: 'disconnect' }[xhsAction[1]];
+    return send(res, 202, await xhs[action]());
+  }
+  if (pathname === '/api/xhs/drafts') {
+    if (method !== 'POST') fail('送入电脑草稿仅支持 POST', 405);
+    return send(res, 202, await xhs.submitDraft(await prepareXhsDraft(await body(req))));
+  }
+  const retryXhsDraft = pathname.match(/^\/api\/xhs\/drafts\/([0-9a-f-]{36})\/retry$/);
+  if (retryXhsDraft) {
+    if (method !== 'POST') fail('重新准备草稿仅支持 POST', 405);
+    const input = await body(req);
+    if (!input.accountId || input.accountId !== xhs.snapshot().account?.id) fail('目标账号已变化，请重新检查小红书连接', 409);
+    return send(res, 202, await xhs.retryDraft(retryXhsDraft[1]));
+  }
+  const recheckXhsDraft = pathname.match(/^\/api\/xhs\/drafts\/([0-9a-f-]{36})\/recheck$/);
+  if (recheckXhsDraft) {
+    if (method !== 'POST') fail('重新核验草稿仅支持 POST', 405);
+    const input = await body(req);
+    const accountId = str(input.accountId, '目标小红书账号', 200);
+    if (accountId !== xhs.snapshot().account?.id) fail('目标账号已变化，请重新检查小红书连接', 409);
+    return send(res, 202, await xhs.recheckDraft(recheckXhsDraft[1], { accountId }));
+  }
+  if (pathname === '/api/radar') {
+    if (method !== 'GET') fail('选题雷达仅支持读取', 405);
+    return send(res, 200, await radarSnapshot());
+  }
+  if (pathname === '/api/radar/profile') {
+    if (method !== 'PUT') fail('产品资料仅支持保存', 405);
+    const input = await body(req);
+    if (input.referenceIds !== undefined) await referenceImages.resolve(normalizeReferenceIds(input.referenceIds));
+    if (Array.isArray(input.materials)) {
+      for (const material of input.materials) if (material?.referenceIds !== undefined) await referenceImages.resolve(normalizeReferenceIds(material.referenceIds));
+    }
+    await radar.updateProfile(input); return send(res, 200, await radarSnapshot());
+  }
+  if (pathname === '/api/radar/settings') {
+    if (method !== 'PUT') fail('巡查设置仅支持保存', 405);
+    await radar.updateSettings(await body(req)); return send(res, 200, await radarSnapshot());
+  }
+  if (pathname === '/api/radar/scan') {
+    if (method !== 'POST') fail('选题评估仅支持 POST', 405);
+    await body(req); requireConfig('text');
+    if (radar.snapshot().status.running) return send(res, 202, await radarSnapshot());
+    radar.scan({ manual: true }).catch(() => {});
+    return send(res, 202, await radarSnapshot());
+  }
+  if (pathname === '/api/radar/notifications') {
+    if (method !== 'PUT') fail('通知设置仅支持保存', 405);
+    await notifications.updateConfig(await body(req)); return send(res, 200, await radarSnapshot());
+  }
+  if (pathname === '/api/radar/notifications/test') {
+    if (method !== 'POST') fail('通知测试仅支持 POST', 405);
+    await body(req); return send(res, 200, await notifications.test());
+  }
+  const retryNotification = pathname.match(/^\/api\/radar\/notifications\/(opportunity|result)\/([0-9a-f-]{36})\/retry$/);
+  if (retryNotification) {
+    if (method !== 'POST') fail('重新发送通知仅支持 POST', 405);
+    await body(req);
+    const [, kind, id] = retryNotification;
+    let result;
+    if (kind === 'opportunity') {
+      const opportunity = radar.snapshot().opportunities.find(item => item.id === id) || radar.getOpportunity(id);
+      if (opportunity.state !== 'pending') fail('只重新提醒有效的待决策选题；已批准、跳过或失效的提案无需重发', 409);
+      await radar.validateOpportunity(id);
+      result = await notifications.retryOpportunity(opportunity, { decisionUrl: decisionUrl(opportunity).url });
+      await radar.setNotification(id, { status: result.status, error: result.status === 'accepted' ? '' : result.message });
+    } else {
+      const project = await projectById(id);
+      if (!project.radarOpportunityId) fail('该作品不属于选题雷达', 404);
+      ensureIdle(project);
+      const opportunity = radar.getOpportunity(project.radarOpportunityId);
+      if (opportunity.projectId !== project.id) fail('提案与作品记录不一致', 409);
+      result = await notifications.retryResult(project, { resultUrl: decisionUrl(opportunity).url });
+    }
+    return send(res, 200, { ...await radarSnapshot(), notificationResult: result });
+  }
+  const radarAction = pathname.match(/^\/api\/radar\/opportunities\/([0-9a-f-]{36})\/(approve|skip|link)$/);
+  if (radarAction) {
+    if (method !== 'POST') fail('选题操作仅支持 POST', 405);
+    const input = await body(req);
+    if (radarAction[2] === 'approve') return send(res, 202, { project: await approveRadarOpportunity(radarAction[1]) });
+    if (radarAction[2] === 'skip') { await radar.skipOpportunity(radarAction[1], input); return send(res, 200, await radarSnapshot()); }
+    const opportunity = radar.getOpportunity(radarAction[1]); return send(res, 200, decisionUrl(opportunity));
+  }
   if (pathname === '/api/reference-images') {
     if (method !== 'POST') fail('图片上传仅支持 POST 请求', 405);
     return send(res, 201, { image: await referenceImages.create(await body(req, 12 * 1024 * 1024)) });
   }
   if (pathname === '/api/brief/create') {
     if (method !== 'POST') fail('聊天创作仅支持 POST 请求', 405);
-    const input = await body(req);
-    const requestId = normalizeCreationRequestId(input?.requestId);
-    if (input.count !== undefined && (!Number.isInteger(input.count) || input.count < 1 || input.count > 10)) fail('图片张数应为 1 到 10 的整数');
-    const project = newProject(input);
-    const referenceIds = normalizeReferenceIds(input.referenceIds);
-    const references = await referenceImages.resolve(referenceIds);
-    if (referenceIds.length) { project.referenceIds = referenceIds; project.referenceImages = referenceMetadata(references); }
-    const fingerprint = requestFingerprint({ source: project.source, style: project.style, aspect: project.aspect, count: project.count, mode: project.mode,
-      ...(referenceIds.length ? { referenceImages: project.referenceImages.map(({ id, sha256 }) => ({ id, sha256 })) } : {}) });
-    const existing = (await store.list()).find(item => item.creationRequestId === requestId);
-    if (existing) {
-      if (existing.creationRequestFingerprint && existing.creationRequestFingerprint !== fingerprint) fail('这个 requestId 已用于其他创作要求，请使用新的请求编号', 409);
-      return send(res, 202, { project: existing });
-    }
-    requireConfig('text'); requireConfig('image'); jobCapacity();
-    project.creationRequestId = requestId; project.creationRequestFingerprint = fingerprint;
-    project.chatStatus = 'analyzing';
-    const record = beginChatRequest(project, { requestId, message: project.source, fingerprint, referenceImages: project.referenceImages }, 'create');
-    await store.save(project); launch(project, item => createInChat(item, record));
-    return send(res, 202, { project });
+    return send(res, 202, { project: await createChatProject(await body(req)) });
   }
   if (pathname === '/api/trends') {
     if (method !== 'GET') fail('热点列表仅支持 GET 请求', 405);
@@ -363,11 +666,21 @@ async function api(req, res, url) {
     else await generateImage(structuredClone(config.image), 'A simple green circle on a plain white background. No text. Square image.', '1:1');
     return send(res, 200, { ok: true, message: kind === 'text' ? '文字接口调用成功' : '生图接口调用成功，已完成一次真实图片生成' });
   }
-  if (pathname === '/api/projects' && method === 'GET') return send(res, 200, { projects: await store.list() });
+  if (pathname === '/api/projects' && method === 'GET') return send(res, 200, { projects: (await store.list()).map(project => delivery.view(project)) });
   if (pathname === '/api/projects' && method === 'POST') {
     requireConfig('text'); jobCapacity();
     const project = newProject(await body(req)); await store.save(project);
     launch(project, analyze); return send(res, 201, { project });
+  }
+  const continueDelivery = pathname.match(/^\/api\/projects\/([0-9a-f-]{36})\/xhs-delivery$/);
+  if (continueDelivery) {
+    if (method !== 'POST') fail('继续送入电脑草稿仅支持 POST', 405);
+    const input = await body(req), project = await projectById(continueDelivery[1]);
+    if (jobs.has(project.id)) fail('请等待本次图文处理完成后再继续送稿', 409);
+    if (input.newVersion !== undefined && typeof input.newVersion !== 'boolean') fail('新版本送稿参数必须为布尔值');
+    return send(res, 202, { project: input.newVersion === true
+      ? await delivery.enqueueVersion(project.id, { accountId: input.accountId })
+      : await delivery.enqueue(project.id, { manual: true, accountId: input.accountId }) });
   }
   const match = pathname.match(/^\/api\/projects\/([^/]+)(?:\/(generate|analyze|export\.zip|chat))?$/);
   if (!match) fail('接口不存在', 404);
@@ -378,16 +691,23 @@ async function api(req, res, url) {
     const existing = project.chatRequests?.find(record => record.requestId === input.requestId);
     if (existing) {
       if (existing.fingerprint && existing.fingerprint !== input.fingerprint) fail('这个 requestId 已用于其他聊天内容，请使用新的请求编号', 409);
-      return send(res, 202, { project, reply: existing.reply || '', action: existing.action });
+      return send(res, 202, { project: delivery.view(project), reply: existing.reply || '', action: existing.action });
     }
-    ensureIdle(project); requireConfig('text'); jobCapacity();
+    ensureIdle(project);
+    const saveIntent = draftSaveIntent(input.message);
+    if (!saveIntent?.only) requireConfig('text');
+    jobCapacity();
     input.referenceImages = referenceMetadata(await referenceImages.resolve(input.referenceIds));
-    const record = beginChatRequest(project, input);
+    const record = beginChatRequest(project, input, saveIntent?.only ? 'save_draft' : null);
+    if (saveIntent) {
+      record.saveVersionRequested = true;
+      record.deliveryAccountId = project.xhsDelivery?.accountId || xhs.snapshot().account?.id || null;
+    }
     project.chatStatus = 'thinking'; await store.save(project);
     launch(project, item => modifyInChat(item, input, record));
     return send(res, 202, { project });
   }
-  if (!action && method === 'GET') return send(res, 200, { project });
+  if (!action && method === 'GET') return send(res, 200, { project: delivery.view(project) });
   if (!action && method === 'DELETE') { ensureIdle(project); await store.remove(project.id); return send(res, 200, { ok: true }); }
   if (!action && method === 'PATCH') {
     ensureIdle(project);
@@ -452,23 +772,21 @@ const server = http.createServer(async (req, res) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   try {
-    if (!allowedHosts.has(req.headers.host)) fail('仅允许通过本机地址访问', 403);
-    if (req.headers.origin && !allowedOrigins.has(req.headers.origin)) fail('不允许跨站访问本地工作台', 403);
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
-    if (req.headers['sec-fetch-site'] === 'cross-site' && !['/', '/index.html'].includes(url.pathname)) fail('不允许跨站访问本地工作台', 403);
+    const decision = url.pathname.match(/^\/decision\/([A-Za-z0-9_.-]{1,1600})(?:\/(approve|skip|media)(?:\/([0-9a-f-]{36}-[0-9a-f-]{36}\.(?:png|jpg|webp|gif)))?)?$/);
+    const publicOrigin = publicDecisionOrigin();
+    const publicHost = publicOrigin ? new URL(publicOrigin).host : null;
+    if (!allowedHosts.has(req.headers.host) && !(decision && req.headers.host === publicHost)) fail('仅允许通过本机地址访问工作台', 403);
+    if (req.headers.origin && !allowedOrigins.has(req.headers.origin) && !(decision && req.headers.origin === publicOrigin)) fail('不允许跨站访问本地工作台', 403);
+    if (req.headers['sec-fetch-site'] === 'cross-site' && !['/', '/index.html'].includes(url.pathname) && !(decision && ['GET', 'HEAD'].includes(req.method))) fail('不允许跨站访问本地工作台', 403);
+    if (decision) return await decisionRoute(req, res, decision);
     if (url.pathname.startsWith('/api/')) {
       // Serialize short mutations across browser tabs. Reserve before any await,
       // so duplicate clicks cannot start two billed jobs from the same draft.
       const mutating = !['GET', 'HEAD'].includes(req.method) && !['/api/test', '/api/brief/chat', '/api/trends/refresh'].includes(url.pathname);
       if (!mutating) return await api(req, res, url);
-      const chatMutation = url.pathname === '/api/brief/create' || /^\/api\/projects\/[^/]+\/chat$/.test(url.pathname);
-      if (chatMutation) while (mutationInFlight) await mutationFinished;
-      else if (mutationInFlight) fail('另一个操作正在保存，请稍后重试', 409);
-      mutationInFlight = true;
-      let finishMutation;
-      mutationFinished = new Promise(resolve => { finishMutation = resolve; });
-      try { return await api(req, res, url); }
-      finally { mutationInFlight = false; finishMutation(); }
+      const chatMutation = url.pathname === '/api/brief/create' || /^\/api\/projects\/[^/]+\/(?:chat|xhs-delivery)$/.test(url.pathname) || /^\/api\/radar\/opportunities\/[^/]+\/approve$/.test(url.pathname) || url.pathname === '/api/xhs/drafts';
+      return await serializeMutation(() => api(req, res, url), chatMutation);
     }
     if (!['GET', 'HEAD'].includes(req.method)) fail('不支持的请求', 405);
     let file;
@@ -496,10 +814,19 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.requestTimeout = 360000;
+let xhsClosing;
+const closeXhs = () => xhsClosing ||= xhs.close().catch(() => {});
 server.on('error', e => {
-  trends.close();
+  trends.close(); radar.close(); delivery.stop(); closeXhs();
   console.error(e.code === 'EADDRINUSE' ? `端口 ${port} 已被占用，可设置 PORT 更换端口` : `服务启动失败：${e.code}`);
   process.exitCode = 1;
 });
-server.on('close', () => trends.close());
+server.on('close', () => { trends.close(); radar.close(); delivery.stop(); closeXhs(); });
+// Playwright installs its own SIGTERM listener after a browser is opened.
+// Explicitly stop HTTP as well, so an idle browser cannot leave the port held.
+process.once('SIGTERM', () => {
+  trends.close(); radar.close(); delivery.stop();
+  server.close(); server.closeIdleConnections();
+  closeXhs().finally(() => process.exit(0));
+});
 server.listen(port, '127.0.0.1', () => console.log(`图文创作工作台已启动：http://127.0.0.1:${port}\n模型密钥和作品只保存在本机 data 目录。按 Ctrl+C 停止。`));

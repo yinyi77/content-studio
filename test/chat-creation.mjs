@@ -15,7 +15,7 @@ const base = 'http://127.0.0.1:19491';
 const secret = 'chat-creation-mock-secret-never-expose';
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jBuoAAAAASUVORK5CYII=';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const active = project => ['analyzing', 'generating'].includes(project.status);
+const active = project => ['analyzing', 'generating'].includes(project.status) || ['thinking', 'analyzing', 'generating'].includes(project.chatStatus);
 const createBody = extra => ({ requestId: randomUUID(), source: 'MOCK 给跑步新手制作一组户外防护知识图文。', style: 'notion', aspect: '3:4', count: 3, mode: 'cards', ...extra });
 
 async function request(route, { method = 'GET', body, origin = base } = {}) {
@@ -167,11 +167,14 @@ test('chat-only creation and follow-up use local mocked models, persisted idempo
 
   await t.test('natural-language post title and caption edits preserve every generated image', async () => {
     const oldPages = structuredClone(current.pages), beforeText = textCalls, beforeImage = imageCalls;
+    const completedAt = current.completedAt;
+    assert.ok(Number.isFinite(Date.parse(completedAt)));
     const message = '把帖子标题改得更温暖，发布正文缩短一些，图片不用动。';
     const result = await chat(current.id, message, { action: 'update_post', reply: 'MOCK 已修改帖子标题和正文。', title: 'MOCK 更温暖的跑步防护', caption: 'MOCK 缩短后的帖子正文。' });
     current = result.project;
     assert.equal(current.title, 'MOCK 更温暖的跑步防护'); assert.equal(current.caption, 'MOCK 缩短后的帖子正文。');
     assert.deepEqual(current.pages, oldPages);
+    assert.equal(current.completedAt, completedAt, 'Copy edits must not be counted as a new image completion');
     assert.equal(textCalls, beforeText + 1); assert.equal(imageCalls, beforeImage);
     assert.ok(current.chatMessages.some(entry => entry.role === 'user' && entry.content === message));
     assert.ok(current.chatMessages.some(entry => entry.role === 'assistant' && entry.requestId === result.requestId && entry.content.includes('已修改')));
@@ -315,12 +318,14 @@ test('chat-only creation and follow-up use local mocked models, persisted idempo
     chatMode = false; imageFailures = 1;
     const created = await create();
     assert.equal(created.project.status, 'partial');
+    assert.equal(created.project.completedAt, undefined);
     assert.equal(created.project.pages.filter(page => page.status === 'done').length, 2);
     assert.ok(!JSON.stringify(created.project).includes(secret));
     const bad = created.project.pages.find(page => page.status === 'error'), good = created.project.pages.filter(page => page.status === 'done');
     const beforeImage = imageCalls;
     const retried = (await chat(created.project.id, '只重试失败的那张图片。', { action: 'regenerate', reply: 'MOCK 已重试失败页。', pageIds: [bad.id] })).project;
     assert.equal(retried.status, 'completed'); assert.equal(imageCalls, beforeImage + 1);
+    assert.ok(Date.parse(retried.completedAt) >= Date.parse(created.project.createdAt), 'Successful retries record their actual completion date');
     for (const previous of good) assert.deepEqual(retried.pages.find(page => page.id === previous.id), previous);
   });
 
