@@ -19,7 +19,7 @@ const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwM
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const active = project => ['analyzing','generating'].includes(project?.status)||['thinking','analyzing','generating'].includes(project?.chatStatus);
 const delivering = project => ['preparing','queued','running'].includes(project?.xhsDelivery?.status);
-const createBody = extra => ({requestId:randomUUID(),source:'MOCK 用真实 coding 工具案例介绍模型 API 使用场景，制作图文并放入草稿。',style:'notion',aspect:'3:4',count:2,mode:'cards',...extra});
+const createBody = extra => ({requestId:randomUUID(),source:'MOCK 用真实 coding 工具案例介绍模型 API 使用场景，制作图文并放入草稿。',style:'notion',aspect:'3:4',count:2,mode:'cards',xhsAutoDelivery:true,...extra});
 
 test('chat generation automatically delivers once to its bound desktop account with safe queueing and recovery', {timeout:60000}, async t => {
   const dir = await realpath(await mkdtemp(path.join(tmpdir(),'content-studio-auto-xhs-')));
@@ -107,12 +107,29 @@ test('chat generation automatically delivers once to its bound desktop account w
   const configured=await request('/api/config',{method:'PUT',body:{text:{baseUrl:upstreamOrigin+'/v1',model:'mock-text',apiKey:secret},image:{baseUrl:upstreamOrigin+'/v1',model:'mock-image',apiKey:secret,mode:'images',size:'auto'}}});
   assert.equal(configured.response.status,200,configured.raw);assert.equal((await calls()).length,0,'Boot and GET do not open a social browser');
 
+  let localProject;
+  await t.test('new work defaults to platform-only and never requires a social session to edit',async()=>{
+    const input=createBody({count:1});delete input.xhsAutoDelivery;
+    const created=await request('/api/brief/create',{method:'POST',body:input});assert.equal(created.response.status,202,created.raw);
+    localProject=await waitProject(created.value.project.id,p=>!active(p));assert.equal(localProject.xhsDelivery,undefined);assert.equal(localProject.xhsAutoDelivery,false);
+    localProject=await chat(localProject.id,'只修改帖子正文，图片不动',{action:'update_post',reply:'MOCK 改好正文',caption:'MOCK 保存在平台内的修改'});
+    assert.equal(localProject.caption,'MOCK 保存在平台内的修改');assert.equal((await calls()).length,0);
+    const changed=await request('/api/brief/create',{method:'POST',body:{...input,xhsAutoDelivery:true}});assert.equal(changed.response.status,409,changed.raw);
+  });
+
   await t.test('unconnected creation stays local until a deliberate same-account continuation',async()=>{
     const made=await create({count:1}),p=await waitProject(made.initial.id,p=>!active(p)&&p.xhsDelivery?.status==='blocked');
     assert.equal(p.status,'completed');assert.equal(p.pages.length,1);assert.equal(p.xhsDelivery.accountId,null);assert.equal((await draftCalls()).length,0);
     await connect();await request(`/api/projects/${p.id}`);await request('/api/projects');assert.equal((await draftCalls()).length,0,'Logging in does not retroactively bind a work');
     const before={textCalls,imageCalls};await continueDelivery(p.id);const delivered=await waitProject(p.id,p=>p.xhsDelivery?.status==='verified');
     assert.equal(delivered.xhsDelivery.accountId,accountA);assert.deepEqual({textCalls,imageCalls},before);
+  });
+
+  await t.test('platform-only work can be sent from its conversation explicitly when ready',async()=>{
+    const before={textCalls,imageCalls,drafts:(await draftCalls()).length};
+    const result=await request(`/api/projects/${localProject.id}/xhs-delivery`,{method:'POST',body:{accountId:accountA,newVersion:true}});assert.equal(result.response.status,202,result.raw);
+    const sent=await waitProject(localProject.id,p=>p.xhsDelivery?.status==='verified');assert.equal(sent.xhsDelivery.accountId,accountA);
+    assert.deepEqual({textCalls,imageCalls},{textCalls:before.textCalls,imageCalls:before.imageCalls});assert.equal((await draftCalls()).length,before.drafts+1);
   });
 
   let first,originalInput;
@@ -248,6 +265,31 @@ test('chat generation automatically delivers once to its bound desktop account w
     assert.equal(restored.status,'completed');assert.ok(['unknown','interrupted'].includes(restored.xhsDelivery.status));assert.equal((await draftCalls()).length,before);
     await request('/api/projects');await request(`/api/projects/${p.id}`);assert.equal((await draftCalls()).length,before);assert.equal((await request(`/api/projects/${unknownProject.id}`)).value.project.xhsDelivery.status,'unknown');await connect('check');
     assert.equal((await request(`/api/projects/${p.id}/xhs-delivery`,{method:'POST',body:{accountId:accountA}})).response.status,409);assert.equal((await draftCalls()).length,before);
+  });
+
+  await t.test('a persisted binding can send after restart without a separate login check click',async()=>{
+    const made=await create({count:1,xhsAutoDelivery:false}),p=await waitProject(made.initial.id,p=>!active(p));
+    await stop();const beforeCalls=(await calls()).length;await start();
+    assert.equal((await request('/api/xhs')).value.connection.state,'needs_attention');await request('/api/projects');
+    assert.equal((await calls()).length,beforeCalls,'Boot and GET leave the browser closed');
+    const before={textCalls,imageCalls,drafts:(await draftCalls()).length};
+    const results=await Promise.all([request(`/api/projects/${p.id}/xhs-delivery`,{method:'POST',body:{accountId:accountA,newVersion:true}}),request(`/api/projects/${p.id}/xhs-delivery`,{method:'POST',body:{accountId:accountA,newVersion:true}})]);
+    for(const r of results)assert.equal(r.response.status,202,r.raw);
+    const delivered=await waitProject(p.id,p=>p.xhsDelivery?.status==='verified');assert.equal(delivered.xhsDelivery.accountId,accountA);
+    assert.deepEqual({textCalls,imageCalls},{textCalls:before.textCalls,imageCalls:before.imageCalls});assert.equal((await draftCalls()).length,before.drafts+1);
+    assert.equal((await calls()).slice(beforeCalls).filter(c=>c.action==='check').length,1);
+  });
+
+  await t.test('an expired saved binding prompts login and an explicit later send rechecks without regenerating work',async()=>{
+    const made=await create({count:1,xhsAutoDelivery:false}),p=await waitProject(made.initial.id,p=>!active(p));
+    await stop();await setControls({loggedIn:false});await start();
+    const before={textCalls,imageCalls,drafts:(await draftCalls()).length};
+    const attempt=await request(`/api/projects/${p.id}/xhs-delivery`,{method:'POST',body:{accountId:accountA,newVersion:true}});assert.equal(attempt.response.status,202,attempt.raw);
+    const blocked=await waitProject(p.id,p=>p.xhsDelivery?.status==='blocked');assert.equal(blocked.xhsDelivery.attempted,false);assert.equal(blocked.status,'completed');assert.equal((await draftCalls()).length,before.drafts);
+    await setControls({loggedIn:true});
+    const retry=await request(`/api/projects/${p.id}/xhs-delivery`,{method:'POST',body:{accountId:accountA,newVersion:true}});assert.equal(retry.response.status,202,retry.raw);
+    await waitProject(p.id,p=>p.xhsDelivery?.status==='verified');
+    assert.deepEqual({textCalls,imageCalls},{textCalls:before.textCalls,imageCalls:before.imageCalls});assert.equal((await draftCalls()).length,before.drafts+1);
   });
   assert.ok(!log.includes(secret));
 });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -60,7 +60,7 @@ test('chat-only creation and follow-up use local mocked models, persisted idempo
       if (textDelay) await sleep(textDelay);
       if (textFails) { res.statusCode = 401; return res.end(JSON.stringify({ error: { message: `MOCK text credential ${secret}` } })); }
       let content;
-      if (isChat) content = typeof chatOutput === 'string' ? chatOutput : JSON.stringify(chatOutput);
+      if (isChat) { const output = Array.isArray(chatOutput) ? chatOutput.shift() : chatOutput; content = typeof output === 'string' ? output : JSON.stringify(output); }
       else {
         const task = body.messages?.map(message => message.content).join('\n') || '';
         const count = Number(task.match(/页数[：:]\s*(\d+)/)?.[1]) || 1;
@@ -163,6 +163,44 @@ test('chat-only creation and follow-up use local mocked models, persisted idempo
     assert.equal((await request('/api/projects')).value.projects.length, beforeCount + 1);
     const replay = await request('/api/brief/create', { method: 'POST', body: input });
     assert.ok([200, 202].includes(replay.response.status)); assert.equal(replay.value.project.id, completed.id);
+  });
+
+  const appendOutput = count => ({ action: 'append_pages', reply: 'MOCK 新增图片方案', pages: Array.from({ length: count }, (_, i) => ({ title: `MOCK 追加图${i+1}`, content: `MOCK 新的真实场景${i+1}`, prompt: `MOCK 保持同组风格，展示新场景${i+1}` })) });
+  await t.test('local creation and chat edits need no social login and append preserves all existing images', async () => {
+    const made = await create(createBody({count:1,mode:'cover'})), old = structuredClone(made.project.pages[0]), before = imageCalls;
+    assert.equal(made.project.xhsAutoDelivery,false); assert.equal(made.project.xhsDelivery,undefined);
+    assert.equal((await request('/api/xhs')).value.connection.state,'disconnected');
+    const result = await chat(made.project.id,'再给我4张配图，一张太少了',appendOutput(4));
+    assert.equal(result.project.status,'completed'); assert.equal(result.project.pages.length,5); assert.equal(result.project.count,5); assert.equal(result.project.mode,'cards');
+    assert.deepEqual(result.project.pages[0],old); assert.equal(imageCalls,before+4); assert.equal(result.project.xhsDelivery,undefined);
+    const after=imageCalls,replay=await request(`/api/projects/${made.project.id}/chat`,{method:'POST',body:{requestId:result.requestId,message:'再给我4张配图，一张太少了'}});
+    assert.equal(replay.response.status,202); assert.equal(imageCalls,after); assert.equal(replay.value.project.pages.length,5);
+  });
+
+  await t.test('a model promise is repaired once into an executable append plan before generating images',async()=>{
+    const made=await create(createBody({count:1})),old=structuredClone(made.project.pages),before={textCalls,imageCalls};
+    const result=await chat(made.project.id,'再补2张配图',[{action:'reply',reply:'MOCK 已经补好了两张图片'},appendOutput(2)]);
+    assert.equal(result.project.pages.length,3);assert.equal(textCalls,before.textCalls+2);assert.equal(imageCalls,before.imageCalls+2);assert.deepEqual(result.project.pages.slice(0,1),old);
+    const second=await chat(made.project.id,'再补1张配图',[{action:'reply',reply:'MOCK 马上生成'},{action:'reply',reply:'MOCK 已完成'}]);
+    assert.equal(second.project.pages.length,3);assert.equal(imageCalls,before.imageCalls+2);assert.match(second.project.chatMessages.at(-1).content,/未.*方案|没有调用生图/);
+  });
+
+  await t.test('confirmation can resume a legacy unexecuted append request instead of promising again',async()=>{
+    const made=await create(createBody({count:1})),p=made.project,old=structuredClone(p.pages[0]),historicalRequest=randomUUID(),now=new Date().toISOString();
+    p.chatMessages.push({role:'user',content:'在给我4张配图，一张太少了',requestId:historicalRequest},{role:'assistant',content:'方案A：保留原图，追加4张配图，共5张\n方案B：替换原图，仅制作4张',requestId:historicalRequest},{role:'user',content:'A'},{role:'assistant',content:'MOCK 请确认'});
+    p.chatRequests.push({requestId:historicalRequest,action:'reply',status:'completed',createdAt:now,completedAt:now});
+    await writeFile(path.join(dir,'projects',p.id,'project.json'),JSON.stringify(p));
+    const before=imageCalls,result=await chat(p.id,'确定',appendOutput(4));
+    assert.equal(result.project.pages.length,5);assert.equal(imageCalls,before+4);assert.deepEqual(result.project.pages[0],old);
+  });
+
+  await t.test('failed added pages are retained and retry never regenerates the original image',async()=>{
+    const made=await create(createBody({count:1})),old=structuredClone(made.project.pages[0]);imageFailures=1;
+    let result=await chat(made.project.id,'再加2张配图',appendOutput(2));
+    assert.equal(result.project.status,'partial');assert.equal(result.project.pages.length,3);assert.deepEqual(result.project.pages[0],old);
+    const failed=result.project.pages.find(page=>page.status==='error'),before=imageCalls;
+    result=await chat(made.project.id,'重试失败图片',{action:'regenerate',reply:'MOCK 补齐新增页',pageIds:[failed.id]});
+    assert.equal(result.project.status,'completed');assert.equal(imageCalls,before+1);assert.deepEqual(result.project.pages[0],old);
   });
 
   await t.test('natural-language post title and caption edits preserve every generated image', async () => {

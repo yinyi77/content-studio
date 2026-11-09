@@ -101,7 +101,62 @@ test('construction is passive; explicit login uses one isolated headed persisten
   assert.equal(state.account.id, ACCOUNT.id); assert.equal(f.launches(), 1);
   assert.equal(f.launchOptions().headless, false); assert.equal(path.basename(f.launchOptions().profile), 'xhs-browser');
   assert.ok(!JSON.stringify(state).includes('cookie'));
+  assert.deepEqual(f.actions.filter(action => action[0] === 'front'), [['front', 0]], 'Explicit first login still opens its normal foreground window');
   await f.browser.inspectAccount(); assert.equal(f.launches(), 1);
+});
+
+test('checking a saved binding preserves an unsaved editor in its original tab without taking foreground', async t => {
+  const f = await fixture(t); await f.browser.ensurePage();
+  await f.page.goto(HOME + 'publish/publish'); f.page.editManually('MOCK 用户尚未保存的人工修改');
+  const originalUrl = f.page.url(), original = f.page.form(), before = f.actions.length;
+  const result = await f.browser.inspectAccount();
+  assert.equal(result.state, 'connected'); assert.equal(result.account.id, ACCOUNT.id);
+  assert.equal(f.pages.length, 2); assert.equal(f.launches(), 1);
+  assert.equal(f.browser.page, f.pages[1]); assert.equal(f.pages[1].url(), HOME);
+  assert.equal(f.page.url(), originalUrl); assert.deepEqual(f.page.form(), original); assert.equal(f.page.isClosed(), false);
+  const checking = f.actions.slice(before);
+  assert.deepEqual(checking.filter(action => action[0] === 'navigate'), [['navigate', HOME]]);
+  assert.ok(!checking.some(action => ['front', 'fill', 'upload', 'click', 'close'].includes(action[0])));
+});
+
+test('saved binding checks also preserve image-only editors and selected upload files', async t => {
+  for (const options of [{ existingImageEditor: true }, { existingFileSelection: true }]) {
+    const f = await fixture(t, options); await f.browser.ensurePage(); await f.page.goto(HOME + 'publish/publish');
+    const original = f.page.form(), before = f.actions.length;
+    const result = await f.browser.inspectAccount();
+    assert.equal(result.state, 'connected'); assert.equal(f.pages.length, 2);
+    assert.equal(f.page.url(), HOME + 'publish/publish'); assert.deepEqual(f.page.form(), original);
+    assert.ok(!f.actions.slice(before).some(action => ['front', 'fill', 'upload', 'click', 'close'].includes(action[0])));
+  }
+});
+
+test('a preserved editor cannot supply stale identity to a newly opened binding-check tab', async t => {
+  const f = await fixture(t, { snapshot: value => ({ ...value, account: null }) });
+  await f.browser.ensurePage(); await f.browser.navigate(f.page, HOME + 'publish/publish'); f.page.editManually('MOCK 私人编辑内容');
+  const request = {}; f.page.handlers.request(request);
+  const oldResponse = () => f.page.handlers.response({ request: () => request, url: () => HOME + 'api/galaxy/user/info', json: async () => ({ data: { userId: 'mock-old-account', nickname: 'MOCK 旧账号' } }) });
+  oldResponse(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.browser.observedAccount.account.id, 'mock-old-account');
+  const checked = await f.browser.inspectAccount(); assert.equal(checked.state, 'needs_attention'); assert.equal(checked.account, null);
+  const control = f.browser.page; assert.notEqual(control, f.page);
+  oldResponse(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.browser.stateFor(await f.browser.snapshot(control)).state, 'needs_attention');
+  const current = {}; control.handlers.request(current);
+  control.handlers.response({ request: () => current, url: () => HOME + 'api/galaxy/user/info', json: async () => ({ data: { userId: ACCOUNT.id, nickname: ACCOUNT.nickname } }) });
+  await Promise.resolve(); await Promise.resolve();
+  oldResponse(); await Promise.resolve(); await Promise.resolve();
+  assert.equal(f.browser.stateFor(await f.browser.snapshot(control)).account.id, ACCOUNT.id);
+  assert.equal(f.page.form().content, 'MOCK 私人编辑内容');
+});
+
+test('saving after a binding check uses a fresh editor while leaving manual content intact', async t => {
+  const f = await fixture(t); await f.browser.ensurePage();
+  await f.page.goto(HOME + 'publish/publish'); f.page.editManually('MOCK 用户自己的待发布正文');
+  const original = f.page.form(), result = await f.browser.saveDraft(f.payload);
+  assert.equal(result.state, 'verified'); assert.equal(result.submitted, true);
+  assert.equal(f.page.url(), HOME + 'publish/publish'); assert.deepEqual(f.page.form(), original);
+  assert.equal(f.actions.filter(action => action[0] === 'upload').length, 1);
+  assert.equal(f.actions.filter(action => action[0] === 'click' && action[1] === 'save').length, 1);
 });
 
 test('login, challenge, missing identity and browser failures remain explicit rather than connected', async t => {

@@ -230,8 +230,18 @@ async function modifyInChat(project, input, record) {
       return await finishChatRequest(project, record, '已提交当前版本的电脑草稿任务，保存结果会显示在本对话中；已有草稿保留原来的内容。', { saveVersion: true });
     }
     const references = await referenceImages.resolve(input.referenceIds.length ? input.referenceIds : project.referenceIds || []);
-    const output = await textCompletion(structuredClone(config.text), withReferenceImages(chatActionMessages(project, input.message), references));
-    const action = parseChatAction(output, project, input.message, { hasNewReferences: input.referenceIds.length > 0 });
+    const textConfig = structuredClone(config.text);
+    const output = await textCompletion(textConfig, withReferenceImages(chatActionMessages(project, input.message), references));
+    let action = parseChatAction(output, project, input.message, { hasNewReferences: input.referenceIds.length > 0 });
+    if (action.needsAppendPlan) {
+      // Some gateways keep returning a conversational promise. One bounded
+      // repair must produce the supported append action before any image work.
+      requireConfig('image');
+      log(project, `正在为新增的 ${action.appendIntent.additionalCount} 张配图整理实际出图方案`);
+      const repaired = await textCompletion(textConfig, withReferenceImages(chatActionMessages(project, input.message, { repairAppend: true }), references));
+      action = parseChatAction(repaired, project, input.message, { hasNewReferences: input.referenceIds.length > 0 });
+      if (action.needsAppendPlan) return await finishChatRequest(project, record, `这次文字模型尚未提供可执行的补图方案，当前仍为 ${project.pages.length} 张，已有图片保留。请重试“再补 ${action.appendIntent.additionalCount} 张配图”。`, { error: '文字模型只返回了回复，未提供新增图片方案，本次没有调用生图' });
+    }
     record.action = action.action; project.chatAction = action.action;
     if (action.action === 'reply') return await finishChatRequest(project, record, action.reply);
     if (action.action === 'update_post') {
@@ -241,12 +251,19 @@ async function modifyInChat(project, input, record) {
       if (action.caption !== undefined && action.caption !== project.caption) changed.push('发布文案');
       if (action.title !== undefined) project.title = action.title;
       if (action.caption !== undefined) project.caption = action.caption;
+      record.appliedChanges = changed;
       log(project, '已通过聊天更新帖子文案');
       return await finishChatRequest(project, record, (changed.length ? `已修改${changed.join('和')}。` : '帖子内容与当前版本一致，已保留现有内容。') + (saveIntent ? '接下来将当前版本另存入电脑草稿，结果会显示在本对话中。' : ''), { saveVersion: Boolean(saveIntent) });
     }
     // Validate image access before changing any page or running a new plan.
     requireConfig('image');
-    if (action.retryPlan) {
+    if (action.action === 'append_pages') {
+      const added = action.pages.map(page => ({ id: randomUUID(), title: page.title, content: page.content, prompt: page.prompt, status: 'pending', imageUrl: null, error: null }));
+      if (!added.length || project.pages.length + added.length > 10) fail('一组图文最多10张，请调整追加数量');
+      project.pages.push(...added); project.count = project.pages.length; project.mode = 'cards';
+      action.pageIds = added.map(page => page.id);
+      record.appendedCount = added.length; record.appliedChanges = [`追加${added.length}张配图`];
+    } else if (action.retryPlan) {
       if (input.referenceIds.length) {
         project.referenceIds = input.referenceIds;
         project.referenceImages = input.referenceImages;
@@ -273,7 +290,10 @@ async function modifyInChat(project, input, record) {
     log(project, `聊天修改已确认，将生成 ${action.pageIds.length} 张图片`);
     await store.save(project); await render(project, action.pageIds);
     const result = generationResult(project, action.pageIds);
-    await finishChatRequest(project, record, result.reply + (action.retryPlan ? planningExplanation(project) : '') + (saveIntent && !result.failed ? '\n接下来将当前版本另存入电脑草稿。' : ''), { error: result.failed ? project.error : null, saveVersion: Boolean(saveIntent) });
+    const reply = action.action === 'append_pages'
+      ? `保留原有图片，本次新增完成 ${action.pageIds.filter(id => project.pages.find(page => page.id === id)?.status === 'done').length}/${action.pageIds.length} 张配图；当前共 ${project.pages.length} 张。${result.failed ? '未完成的新增图片可以直接说“重试失败图片”。' : '已保存在本平台，可以继续修改。'}`
+      : result.reply + (action.retryPlan ? planningExplanation(project) : '');
+    await finishChatRequest(project, record, reply + (saveIntent && !result.failed ? '\n接下来将当前版本另存入电脑草稿。' : ''), { error: result.failed ? project.error : null, saveVersion: Boolean(saveIntent) });
   } catch (error) {
     project.status = imageWorkStarted ? 'error' : previousStatus;
     const message = redact(error.message);
@@ -396,6 +416,7 @@ async function notifyRadarResult(project) {
 }
 async function createChatProject(input, { radarOpportunityId } = {}) {
   const requestId = normalizeCreationRequestId(input?.requestId);
+  if (input.xhsAutoDelivery !== undefined && typeof input.xhsAutoDelivery !== 'boolean') fail('自动存入小红书草稿的选项必须为布尔值');
   if (input.count !== undefined && (!Number.isInteger(input.count) || input.count < 1 || input.count > 10)) fail('图片张数应为 1 到 10 的整数');
   const project = newProject(input);
   const referenceIds = normalizeReferenceIds(input.referenceIds);
@@ -406,12 +427,14 @@ async function createChatProject(input, { radarOpportunityId } = {}) {
   const existing = (await store.list()).find(item => item.creationRequestId === requestId);
   if (existing) {
     if (existing.creationRequestFingerprint && existing.creationRequestFingerprint !== fingerprint) fail('这个 requestId 已用于其他创作要求，请使用新的请求编号', 409);
+    if (input.xhsAutoDelivery !== undefined && typeof existing.xhsAutoDelivery === 'boolean' && input.xhsAutoDelivery !== existing.xhsAutoDelivery) fail('这次创作的送稿选项已经固定，请勿用同一个请求编号改变是否自动送稿', 409);
     return existing;
   }
   requireConfig('text'); requireConfig('image'); jobCapacity();
   project.creationRequestId = requestId; project.creationRequestFingerprint = fingerprint;
+  project.xhsAutoDelivery = input.xhsAutoDelivery === true;
   if (radarOpportunityId) project.radarOpportunityId = radarOpportunityId;
-  else if (!/(?:不要|先别|暂不|不需要).{0,6}(?:存|送|同步|上传).{0,6}(?:草稿|小红书)|(?:仅|只)生成[，,、\s]*(?:不要|不)上传/.test(project.source)) {
+  else if (project.xhsAutoDelivery && !/(?:不要|先别|暂不|不需要).{0,6}(?:存|送|同步|上传).{0,6}(?:草稿|小红书)|(?:仅|只)生成[，,、\s]*(?:不要|不)上传/.test(project.source)) {
     if (input.xhsAccountId !== undefined && input.xhsAccountId !== null && (typeof input.xhsAccountId !== 'string' || !/^[a-zA-Z0-9_-]{1,120}$/.test(input.xhsAccountId))) fail('目标小红书账号格式不正确');
     project.xhsDelivery = initialXhsDelivery(xhs.snapshot(), input.xhsAccountId);
   }

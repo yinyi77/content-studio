@@ -43,6 +43,41 @@ function fixture(initial = project(), overrides = {}) {
   return { queue, store, xhs, state, calls, receipt, initial, get: () => store.get(initial.id) };
 }
 
+test('a saved binding is checked on explicit send after restart without a manual connection step', async () => {
+  const p = project(); delete p.xhsDelivery;
+  const f = fixture(p); f.state.connection.state = 'needs_attention';
+  f.xhs.checkLogin = async () => { f.calls.push({ action: 'check' }); f.state.connection.state = 'connected'; };
+  await f.queue.recover(); f.queue.view(await f.get());
+  assert.deepEqual(f.calls, [], 'Startup and reads never open the bound account');
+  await f.queue.enqueueVersion(p.id, { accountId: A }); await f.queue.tail;
+  assert.equal(f.queue.view(await f.get()).xhsDelivery.status, 'verified');
+  assert.deepEqual(f.calls.map(call => call.action), ['check', 'prepare', 'submit']);
+});
+
+test('expired bound sessions stop before preparing or writing and can be checked again by a deliberate retry', async () => {
+  const f = fixture(project({status:'blocked'})); f.state.connection.state = 'login_required';
+  let valid = false;
+  f.xhs.checkLogin = async () => { f.calls.push({ action:'check' }); f.state.connection = {state:valid?'connected':'login_required',message:'MOCK 请重新扫码绑定'}; };
+  await f.queue.enqueue(f.initial.id, {manual:true,accountId:A}); await f.queue.tail;
+  let p = f.queue.view(await f.get());
+  assert.equal(p.xhsDelivery.status,'blocked'); assert.equal(p.xhsDelivery.attempted,false);
+  assert.deepEqual(f.calls.map(call=>call.action),['check']);
+  assert.match(p.xhsDelivery.message,/重新扫码/);
+  valid = true;
+  await f.queue.enqueue(f.initial.id, {manual:true,accountId:A}); await f.queue.tail;
+  p = f.queue.view(await f.get()); assert.equal(p.xhsDelivery.status,'verified');
+  assert.deepEqual(f.calls.map(call=>call.action),['check','check','prepare','submit']);
+});
+
+test('a different live account cannot receive the saved binding delivery', async () => {
+  const f = fixture(); f.state.connection.state = 'needs_attention';
+  f.xhs.checkLogin = async () => { f.calls.push({action:'check'}); f.state.account.id=B; f.state.connection.state='connected'; };
+  await f.queue.enqueueVersion(f.initial.id,{accountId:A}); await f.queue.tail;
+  assert.equal((await f.get()).xhsDelivery.accountId,A);
+  assert.equal((await f.get()).xhsDelivery.status,'blocked');
+  assert.deepEqual(f.calls.map(call=>call.action),['check']);
+});
+
 test('restart between creative completion and enqueue offers explicit continuation without an automatic send', async () => {
   const f = fixture();
   await f.queue.recover();

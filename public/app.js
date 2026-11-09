@@ -11,7 +11,7 @@ const state = {
   view: ['trends','radar','xhs'].includes(new URLSearchParams(location.search).get('view')) ? new URLSearchParams(location.search).get('view') : 'briefing', config: null, projects: [],
   busy: '', search: '', filter: 'all',
   models: { text: [], image: [] }, testResults: {}, bootError: '',
-  guide: restoreGuidance(), guideBusy: false, guideEdit: null, guideProject: null, guideActionBusy: '',
+  guide: restoreGuidance(), guideBusy: false, guideEdit: null, guideProject: null, guideActionBusy: '', guidePublishPrompt: false,
   guideStyleCategory: 'all', guideStyleSearch: '',
   guideUploadBusy: false,
   trends: null, trendsError: '', trendsLoading: false, trendsBusy: '',
@@ -31,6 +31,7 @@ let radarPollTimer;
 let radarLoadVersion = 0;
 let xhsPollTimer;
 let xhsLoadVersion = 0;
+let xhsDraftRequestVersion = 0;
 
 const paths = {
   spark: '<path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4Z"/><path d="m20 2 .6 1.4L22 4l-1.4.6L20 6l-.6-1.4L18 4l1.4-.6Z"/>',
@@ -65,7 +66,7 @@ const buttonBusy = name => state.busy === name ? '<span class="spinner spinner-s
 
 function blankGuidance() {
   return {messages:[],analysis:'',source:'',input:'',error:'',pending:false,clarificationAsked:false,decision:null,
-    matchTrends:true,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
+    matchTrends:true,xhsAutoDelivery:false,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
     preferences:{style:null,aspect:null,count:null,mode:null},
     recommendations:{style:'notion',aspect:'3:4',count:5,mode:'cards'},reasons:{}};
 }
@@ -96,6 +97,7 @@ function restoreGuidance() {
     for(const key of ['analysis','source','input','error'])if(typeof data[key]==='string')base[key]=data[key].slice(0,24000);
     if(data.reasons&&typeof data.reasons==='object')for(const key of ['style','aspect','count'])if(typeof data.reasons[key]==='string')base.reasons[key]=data.reasons[key].slice(0,1000);
     base.matchTrends=data.matchTrends!==false;
+    base.xhsAutoDelivery=data.xhsAutoDelivery===true;
     base.trendMatches=normalizeGuideTrendMatches(data.trendMatches);
     if(base.matchTrends&&typeof data.selectedTrend?.id==='string'){
       const selected=base.trendMatches?.matches.find(item=>item.id===data.selectedTrend.id)||null;
@@ -106,6 +108,7 @@ function restoreGuidance() {
     if(typeof data.studioSource==='string')base.studioSource=data.studioSource.slice(0,24000);
     if(data.creation&&typeof data.creation==='object'&&isGuideUuid(data.creation.requestId)){
       const c=data.creation;base.creation={requestId:c.requestId,projectId:isGuideUuid(c.projectId)?c.projectId:null,status:typeof c.status==='string'?c.status.slice(0,40):'unknown',error:typeof c.error==='string'?c.error.slice(0,1000):'',requestedAt:typeof c.requestedAt==='string'?c.requestedAt:null};
+      if(c.capture&&typeof c.capture==='object')base.creation.capture={xhsAutoDelivery:c.capture.xhsAutoDelivery===true,...(c.capture.xhsAutoDelivery===true?{xhsAccountId:typeof c.capture.xhsAccountId==='string'&&/^[A-Za-z0-9_-]{1,120}$/.test(c.capture.xhsAccountId)?c.capture.xhsAccountId:null}:{})};
       if(c.lastChatRequest&&isGuideUuid(c.lastChatRequest.requestId)&&typeof c.lastChatRequest.message==='string'&&c.lastChatRequest.message.length<=6000)base.creation.lastChatRequest={requestId:c.lastChatRequest.requestId,message:c.lastChatRequest.message,images:normalizeGuideImages(c.lastChatRequest.images),status:typeof c.lastChatRequest.status==='string'?c.lastChatRequest.status.slice(0,40):'unknown',restoredInput:c.lastChatRequest.restoredInput===true};
     }
     if(typeof data.creationError==='string')base.creationError=data.creationError.slice(0,1000);
@@ -197,10 +200,10 @@ function guideQuestion(field) {
 function guidanceView() {
   const g=state.guide,p=state.guideProject,creating=Boolean(g.creation),locked=guideWorkActive();
   const examples=['给新手做一组养猫准备清单','把产品介绍做成一组宣传图','做一张 AI 工作流知识图'];
-  const thread=g.messages.length?g.messages.map(m=>`<article class="guide-message ${m.role==='user'?'user':'assistant'} ${m.kind==='clarification'?'is-clarification':''}"><span class="guide-message-label">${m.role==='user'?'你':'创意编辑'}</span>${m.kind==='clarification'?`<span class="guide-batch-label">${icon('spark')}一起补充，一次说完</span>`:''}${guideImageMessageView(m.images)}<p>${h(m.content)}</p></article>`).join(''):creating?`<article class="guide-message assistant"><span class="guide-message-label">创意编辑</span>${guideImageMessageView(g.referenceImages)}<p>已载入这份作品。查看图文，或直接告诉我想怎么改。</p></article>`:`<div class="guide-welcome"><span class="eyebrow">从一个想法，到一整组内容</span><h2>今天，想创作点什么？</h2><p>先说你的想法，需要补充的我会一次问清。<br>你回答后，我来完成文案、全部图片，并存入电脑草稿。</p><div class="guide-flow" aria-label="创作流程"><span>说个想法</span><i>→</i><span>一次补充</span><i>→</i><span>完整图文</span><i>→</i><span>小红书草稿</span></div><div class="guide-examples">${examples.map((example,i)=>`<button data-action="guide-example" data-example="${i}">${h(example)} ${icon('arrow')}</button>`).join('')}</div></div>`;
+  const thread=g.messages.length?g.messages.map(m=>`<article class="guide-message ${m.role==='user'?'user':'assistant'} ${m.kind==='clarification'?'is-clarification':''}"><span class="guide-message-label">${m.role==='user'?'你':'创意编辑'}</span>${m.kind==='clarification'?`<span class="guide-batch-label">${icon('spark')}一起补充，一次说完</span>`:''}${guideImageMessageView(m.images)}<p>${h(m.content)}</p></article>`).join(''):creating?`<article class="guide-message assistant"><span class="guide-message-label">创意编辑</span>${guideImageMessageView(g.referenceImages)}<p>已载入这份作品。查看图文，或直接告诉我想怎么改。</p></article>`:`<div class="guide-welcome"><span class="eyebrow">从一个想法，到一整组内容</span><h2>今天，想创作点什么？</h2><p>先说你的想法，需要补充的我会一次问清。<br>你回答后，我来完成文案和全部图片，${g.xhsAutoDelivery?'并存入小红书电脑草稿。':'先保存在本平台。'}</p><div class="guide-flow" aria-label="创作流程"><span>说个想法</span><i>→</i><span>一次补充</span><i>→</i><span>完整图文</span><i>→</i><span>${g.xhsAutoDelivery?'小红书草稿':'发布时再送稿'}</span></div><div class="guide-examples">${examples.map((example,i)=>`<button data-action="guide-example" data-example="${i}">${h(example)} ${icon('arrow')}</button>`).join('')}</div></div>`;
   const preferenceIcons={style:'image',aspect:'expand',count:'cards'};
   const preferences=(g.analysis||creating)?`<div class="guide-inline-brief" aria-label="创作参数">${['style','aspect','count'].map(f=>{
-    const value=g.preferences[f]??g.recommendations[f];
+    const value=creating&&f==='count'&&p?.pages?.length?p.pages.length:g.preferences[f]??g.recommendations[f];
     return `<span class="guide-preference">${icon(preferenceIcons[f])}<span class="sr-label">${guideFieldLabel(f)}：</span><strong>${h(guideValueLabel(f,value))}</strong>${!creating&&g.preferences[f]===null?'<span>建议</span>':''}</span>`;
   }).join('')}</div>`:'';
   const trend=g.selectedTrend?`<details class="guide-context-trend"><summary><span>已选热点</span><strong>${h(g.selectedTrend.title)}</strong><span>${h(trendName(g.selectedTrend.platform))}</span></summary><p>${h(g.selectedTrend.angle)}</p>${g.selectedTrend.kind==='meme'?`<small>热梗候选 · 至 ${guideTrendDate(g.selectedTrend.expiresAt)} 有效</small>`:''}${!creating?`<button type="button" class="text-button" data-action="guide-trend-clear" ${state.guideBusy?'disabled':''}>移除热点</button>`:''}</details>`:'';
@@ -217,13 +220,13 @@ function guideDeliveryActive(project) {
 }
 function guideProjectActive(project) { return guideGenerationActive(project)||guideDeliveryActive(project); }
 function guideXhsConnectionView() {
-  const p=state.guideProject,delivery=p?.xhsDelivery,busy=xhsWorking()||guideDeliveryActive(p),bound=delivery?.accountId;
-  const current=xhsAccountId(),same=Boolean(bound&&current===bound),connected=xhsConnected();
-  const label=delivery?.enabled&&bound?`本次草稿账号：${delivery.accountName||bound}`:connected?`${p&&!delivery?.enabled?'小红书账号':'完成后自动存至'}：${state.xhs.account.nickname||current}`:state.xhs?'连接小红书后可自动存草稿':state.xhsError?'暂未读取到小红书连接':'正在读取小红书连接…';
-  const message=delivery?.enabled&&bound&&current&&current!==bound?'当前连接账号与本次创作目标不同，请连接原账号后继续。':state.xhsError||(!connected&&state.xhs?.connection?.message)||'';
+  const g=state.guide,p=state.guideProject,delivery=p?.xhsDelivery,busy=xhsWorking()||guideDeliveryActive(p),bound=delivery?.accountId;
+  const current=xhsAccountId(),same=Boolean(bound&&current===bound),connected=xhsConnected(),boundAccount=xhsBound(),automatic=Boolean(delivery?.enabled||!p&&(g.creation?.capture?.xhsAutoDelivery??g.xhsAutoDelivery));
+  const label=delivery?.enabled&&bound?`本次草稿账号：${delivery.accountName||bound}`:automatic?(boundAccount?`完成后自动存至：${state.xhs.account.nickname||current}`:'已开启自动存入小红书草稿'):boundAccount?`已绑定小红书：${state.xhs.account.nickname||current}`:'创作与修改保存在本平台';
+  const message=delivery?.enabled&&bound&&current&&current!==bound?'当前连接账号与本次创作目标不同，请连接原账号后继续。':boundAccount&&!connected?'已绑定，送稿时自动检查登录；失效或需要验证时会提醒你。':automatic?(state.xhsError||(!connected&&state.xhs?.connection?.message)||'整组图文完成后送入电脑草稿，发布由你决定。'):'无需登录小红书也能继续创作。准备发布时，再连接账号并送入草稿。';
   const checking=busy?'<span class="spinner spinner-small"></span>':'';
-  const canOpen=connected&&(!bound||same);
-  return `<div class="guide-xhs-connection ${connected?'is-connected':''}"><div><span class="guide-xhs-mark">${icon('file')}</span><span><strong>${checking}${h(label)}</strong>${message?`<small>${h(message)}</small>`:''}</span></div><div class="guide-xhs-connection-actions">${connected?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${busy||!canOpen?'disabled':''}>打开电脑草稿 ${icon('arrow')}</button>`:`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="login" ${busy?'disabled':''}>${state.xhs?.connection?.browserOpen?'打开登录窗口':'连接小红书'} ${icon('arrow')}</button>`}<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="check" ${busy?'disabled':''}>${connected?'检查连接':'我已登录，检查连接'}</button></div></div>`;
+  const canOpen=connected&&(!bound||same),showConnection=automatic||state.guidePublishPrompt;
+  return `<div class="guide-xhs-connection ${connected&&automatic?'is-connected':''} ${automatic?'':'is-local'}"><div><span class="guide-xhs-mark">${icon('file')}</span><span><strong>${checking}${h(label)}</strong><small>${h(message)}</small></span></div>${showConnection?`<div class="guide-xhs-connection-actions">${connected?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${busy||!canOpen?'disabled':''}>打开电脑草稿 ${icon('arrow')}</button>`:`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="login" ${busy?'disabled':''}>${boundAccount?'重新扫码绑定':state.xhs?.connection?.browserOpen?'打开登录窗口':'连接小红书'} ${icon('arrow')}</button>`}<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="check" ${busy?'disabled':''}>${connected?'检查连接':boundAccount?'手动检查登录':'我已登录，检查连接'}</button></div>`:''}${!g.creation?`<label class="guide-xhs-auto-option"><input id="guide-xhs-auto-delivery" type="checkbox" ${g.xhsAutoDelivery?'checked':''} ${state.guideBusy||state.guideActionBusy?'disabled':''}><span>生成后自动存入小红书草稿 <small>可选</small></span></label>`:''}</div>`;
 }
 function guideEditedAfterDelivery(project) {
   const delivery=project?.xhsDelivery,at=Date.parse(delivery?.verifiedAt||delivery?.updatedAt);
@@ -250,20 +253,29 @@ function guideDeliveryLabel(project) {
   if(guideEditedAfterDelivery(project))return '图文已更新，原草稿保留此前版本';
   return ({waiting_generation:'图文完成后自动存草稿',preparing:'正在准备小红书草稿',queued:'正在等待送入电脑草稿',running:'正在存入并核验电脑草稿',verified:'图文和电脑草稿已完成',filled:'图文已填入，草稿待核验',unknown:'草稿保存结果待核验',failed:'图文已保留，草稿尚未送达',blocked:'图文已保留，草稿等待继续',interrupted:'草稿流程已中断，需人工核验'}[delivery.status])||'草稿状态待确认';
 }
+function guideLocalDraftView(project) {
+  const ready=xhsEligible(project),busy=guideGenerationActive(project)||Boolean(state.guideActionBusy),boundAccount=xhsBound();
+  return `<section class="guide-xhs-delivery guide-local-draft" aria-label="本平台草稿" aria-busy="${busy}"><div class="guide-delivery-result"><div><strong>${icon('file')}${ready?'图文已保存在本平台':'创作内容保存在本平台'}</strong><p>直接在对话里继续修改，准备发布时再送入小红书草稿。</p>${state.guidePublishPrompt&&!boundAccount?'<p class="guide-local-login-hint" role="status">首次送入小红书时，请在上方扫码并确认绑定账号，之后送稿会自动检查保存的登录状态。</p>':boundAccount?`<small>目标账号：${h(state.xhs.account.nickname||xhsAccountId())}${xhsConnected()?'':' · 送稿时自动检查登录'}</small>`:''}</div>${ready?`<div class="guide-delivery-actions"><button class="button button-secondary" type="button" data-action="guide-xhs-first" data-account-id="${h(boundAccount?xhsAccountId():'')}" ${busy||xhsWorking()?'disabled':''}>${icon('arrow')}送入小红书草稿</button></div>`:''}</div></section>`;
+}
 function guideDeliveryView(project) {
-  const delivery=project?.xhsDelivery;if(!delivery?.enabled)return '';
+  const delivery=project?.xhsDelivery;if(!delivery?.enabled)return guideLocalDraftView(project);
   const imagesReady=project.status==='completed'&&(project.pages||[]).length>0&&(project.pages||[]).every(page=>page.status==='done'&&page.imageUrl),busy=guideDeliveryActive(project),receipt=guideDeliveryReceipt(project),edited=guideEditedAfterDelivery(project);
   const warning=['blocked','failed','filled','unknown','interrupted'].includes(delivery.status),verified=delivery.status==='verified';
   const planningDone=Boolean(project.pages?.length),accountMatch=!delivery.accountId||delivery.accountId===xhsAccountId();
   const stages=[['策划内容',planningDone,'analyzing'],['生成完整图文',imagesReady,'generating'],['存入小红书草稿',verified,'delivery']];
-  const canContinue=imagesReady&&guideDeliveryMayContinue(delivery)&&xhsConnected()&&accountMatch&&!busy&&!xhsWorking()&&!state.guideActionBusy;
+  const canContinue=imagesReady&&guideDeliveryMayContinue(delivery)&&xhsBound()&&accountMatch&&!busy&&!xhsWorking()&&!state.guideActionBusy;
+  const canSend=xhsBound()&&accountMatch&&!busy&&!xhsWorking()&&!guideGenerationActive(project)&&!state.guideActionBusy;
   const canOpen=xhsConnected()&&accountMatch&&!busy&&!xhsWorking()&&!guideGenerationActive(project)&&!state.guideActionBusy;
   const canRecheck=Boolean(delivery.draftId&&xhsCanRecheck(receipt)),canSaveVersion=edited&&imagesReady&&delivery.canSaveVersion!==false&&!delivery.pendingVersion;
   const hint=edited?'当前修改还未送入小红书。直接说“把修改版存到草稿箱”，或在这里另存新版；此前草稿保留。':delivery.message||(!imagesReady?'全部图片完成后，会自动送入本次绑定账号的电脑草稿。':busy?'正在后台送稿，刷新页面不会重复上传。':verified?'已保存至电脑草稿，发布由你在小红书决定。':'图文和图片已经保留，请按提示继续处理。');
   const continueLabel=delivery.accountId?'继续送入草稿':`继续送至 ${state.xhs?.account?.nickname||'当前账号'} 草稿`;
-  return `<section class="guide-xhs-delivery ${warning?'is-warning':verified?'is-verified':''}" aria-label="创作与草稿交付进度" aria-busy="${busy}"><ol class="guide-delivery-steps">${stages.map(([label,done,kind],index)=>{const current=!done&&(kind==='delivery'?imagesReady:(kind==='generating'?planningDone:!planningDone));return `<li class="${done?'is-done':current?'is-current':''}"><span>${done?icon('check'):index+1}</span><strong>${label}</strong></li>`;}).join('')}</ol><div class="guide-delivery-result"><div><strong>${busy?'<span class="spinner spinner-small"></span>':icon(verified?'check':warning?'alert':'file')}${h(guideDeliveryLabel(project))}</strong><p>${h(hint)}</p>${delivery.accountId?`<small>目标账号：${h(delivery.accountName||delivery.accountId)}${Number(delivery.version)>1?` · 第 ${Number(delivery.version)} 版`:''}</small>`:''}${delivery.accountId&&xhsAccountId()&& !accountMatch?'<small class="guide-delivery-account-mismatch">当前连接了其他账号，请连接本次目标账号，平台不会改投。</small>':''}</div><div class="guide-delivery-actions">${imagesReady&&guideDeliveryMayContinue(delivery)?`<button class="button button-secondary" type="button" data-action="guide-xhs-continue" ${canContinue?'':'disabled'}>${icon('arrow')}${h(continueLabel)}</button>${!xhsConnected()?'<span>先在上方连接账号，再继续送稿。</span>':''}`:''}${canRecheck?`<button class="button button-secondary" type="button" data-action="guide-xhs-recheck" data-id="${h(delivery.draftId)}" ${canOpen?'':'disabled'}>${icon('refresh')}重新核验草稿</button>`:''}${canSaveVersion?`<button class="button button-secondary" type="button" data-action="guide-xhs-version" ${canOpen?'':'disabled'}>${icon('arrow')}将当前版本另存草稿</button>`:''}${['verified','filled','unknown','interrupted'].includes(delivery.status)?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${canOpen?'':'disabled'}>${verified?'打开电脑草稿':'打开官方窗口核对'} ${icon('arrow')}</button>`:''}</div></div>${delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery)?'<p class="guide-delivery-note">上次在送稿前中断，图文已保留。点击继续后才会送入电脑草稿。</p>':['unknown','filled','interrupted'].includes(delivery.status)?`<p class="guide-delivery-note">${canRecheck?'重新核验只读取已有草稿，不会再次上传。若尚未保存，请先在官方窗口保存后再核验。':'请在小红书官方窗口核对，本平台不会自动重复提交这份草稿。'}</p>`:''}${guideDeliveryHistoryView(delivery)}</section>`;
+  return `<section class="guide-xhs-delivery ${warning?'is-warning':verified?'is-verified':''}" aria-label="创作与草稿交付进度" aria-busy="${busy}"><ol class="guide-delivery-steps">${stages.map(([label,done,kind],index)=>{const current=!done&&(kind==='delivery'?imagesReady:(kind==='generating'?planningDone:!planningDone));return `<li class="${done?'is-done':current?'is-current':''}"><span>${done?icon('check'):index+1}</span><strong>${label}</strong></li>`;}).join('')}</ol><div class="guide-delivery-result"><div><strong>${busy?'<span class="spinner spinner-small"></span>':icon(verified?'check':warning?'alert':'file')}${h(guideDeliveryLabel(project))}</strong><p>${h(hint)}</p>${delivery.accountId?`<small>目标账号：${h(delivery.accountName||delivery.accountId)}${Number(delivery.version)>1?` · 第 ${Number(delivery.version)} 版`:''}</small>`:''}${delivery.accountId&&xhsAccountId()&& !accountMatch?'<small class="guide-delivery-account-mismatch">当前连接了其他账号，请连接本次目标账号，平台不会改投。</small>':''}</div><div class="guide-delivery-actions">${imagesReady&&guideDeliveryMayContinue(delivery)?`<button class="button button-secondary" type="button" data-action="guide-xhs-continue" ${canContinue?'':'disabled'}>${icon('arrow')}${h(continueLabel)}</button>${!xhsBound()?'<span>首次使用请先在上方扫码绑定账号。</span>':!xhsConnected()?'<span>已绑定账号，送稿时会自动检查登录。</span>':''}`:''}${canRecheck?`<button class="button button-secondary" type="button" data-action="guide-xhs-recheck" data-id="${h(delivery.draftId)}" ${canOpen?'':'disabled'}>${icon('refresh')}重新核验草稿</button>`:''}${canSaveVersion?`<button class="button button-secondary" type="button" data-action="guide-xhs-version" ${canSend?'':'disabled'}>${icon('arrow')}将当前版本另存草稿</button>`:''}${['verified','filled','unknown','interrupted'].includes(delivery.status)?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${canOpen?'':'disabled'}>${verified?'打开电脑草稿':'打开官方窗口核对'} ${icon('arrow')}</button>`:''}</div></div>${delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery)?'<p class="guide-delivery-note">上次在送稿前中断，图文已保留。点击继续后才会送入电脑草稿。</p>':['unknown','filled','interrupted'].includes(delivery.status)?`<p class="guide-delivery-note">${canRecheck?'重新核验只读取已有草稿，不会再次上传。若尚未保存，请先在官方窗口保存后再核验。':'请在小红书官方窗口核对，本平台不会自动重复提交这份草稿。'}</p>`:''}${guideDeliveryHistoryView(delivery)}</section>`;
 }
 function guideCompletionNotice(project) {
+  const latest=project.chatRequests?.at(-1);
+  if(project.chatStatus==='error'||latest?.status==='error')return {message:project.chatError||latest?.error||latest?.reply||'这次修改尚未应用，原图文已保留。',warning:true};
+  if(latest?.status==='completed'&&latest.action==='reply')return {message:'已回复，图文保持当前版本。',warning:false};
+  if(latest?.status==='completed'&&latest.action==='append_pages')return {message:Number.isInteger(latest.appendedCount)&&latest.appendedCount>0?`已追加 ${latest.appendedCount} 张配图，原有图片保留。`:'新增配图已保存，原有图片保留。',warning:false};
   const delivery=project?.xhsDelivery;
   if(delivery?.enabled){
     if(delivery.status==='verified')return {message:guideEditedAfterDelivery(project)?'本次图文修改已完成，原小红书草稿仍保留此前版本。':'图文已完成，并已存入小红书电脑草稿。',warning:false};
@@ -281,7 +293,7 @@ function updateGuideXhs() {
 async function continueGuideXhsDelivery() {
   const p=state.guideProject,delivery=p?.xhsDelivery;
   if(!p||!guideDeliveryMayContinue(delivery)||guideGenerationActive(p)||guideDeliveryActive(p)||state.guideActionBusy)return;
-  if(!xhsConnected())return notify('请先在当前对话上方连接并检查小红书账号。',true);
+  if(!xhsBound())return notify('首次使用请先在当前对话上方扫码绑定小红书账号。',true);
   if(delivery.accountId&&delivery.accountId!==xhsAccountId())return notify('当前账号与本次创作目标不同，请连接原账号后继续。',true);
   const version=guideCreationVersion,id=p.id,accountId=xhsAccountId();state.guideActionBusy='xhs-delivery';renderGuidance({preserve:true});
   try{const result=await api(`/api/projects/${encodeURIComponent(id)}/xhs-delivery`,{method:'POST',body:{accountId}});if(version!==guideCreationVersion||state.guide.creation?.projectId!==id)return;if(result.project)setGuideProject(result.project);else await loadGuideProject({quiet:true});}
@@ -291,7 +303,7 @@ async function continueGuideXhsDelivery() {
 async function saveGuideXhsVersion() {
   const p=state.guideProject,delivery=p?.xhsDelivery;
   if(!p||!guideEditedAfterDelivery(p)||delivery.canSaveVersion===false||delivery.pendingVersion||!xhsEligible(p)||guideWorkActive()||xhsWorking())return;
-  if(!xhsConnected())return notify('请先连接并检查小红书账号。',true);
+  if(!xhsBound())return notify('请先扫码绑定小红书账号。',true);
   if(!delivery.accountId||delivery.accountId!==xhsAccountId())return notify('当前账号与原草稿目标不同，请连接原账号后另存新版。',true);
   const version=guideCreationVersion,id=p.id,accountId=xhsAccountId();state.guideActionBusy='xhs-version';renderGuidance({preserve:true});
   try{
@@ -302,14 +314,34 @@ async function saveGuideXhsVersion() {
   }catch(error){if(version===guideCreationVersion){notify(error.message,true);if(error.status===409){await loadXhs({quiet:true});await loadGuideProject({quiet:true});}}}
   finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();}}
 }
+async function saveGuideFirstXhsDraft(shownAccountId) {
+  const p=state.guideProject;
+  if(!p||p.xhsDelivery?.enabled||!xhsEligible(p)||guideWorkActive()||xhsWorking())return;
+  state.guidePublishPrompt=true;
+  if(!xhsBound()){
+    renderGuidance({preserve:true});
+    document.querySelector('#guide-xhs-region')?.scrollIntoView({behavior:'smooth',block:'nearest'});
+    return notify('图文已经保存在本平台。首次送稿请在上方扫码并确认绑定账号。');
+  }
+  if(!shownAccountId||shownAccountId!==xhsAccountId()){renderGuidance({preserve:true});return notify('小红书账号已变化，请核对当前显示的目标账号后再送稿。',true);}
+  const version=guideCreationVersion,id=p.id,accountId=shownAccountId;state.guideActionBusy='xhs-first';renderGuidance({preserve:true});
+  try{
+    const result=await api(`/api/projects/${encodeURIComponent(id)}/xhs-delivery`,{method:'POST',body:{accountId,newVersion:true}});
+    if(version!==guideCreationVersion||state.guide.creation?.projectId!==id)return;
+    if(result.project)setGuideProject(result.project);else await loadGuideProject({quiet:true});
+    notify('正在将当前图文送入电脑草稿，结果会在本对话中显示。');
+  }catch(error){if(version===guideCreationVersion){notify(error.message,true);if(error.status===409){await loadXhs({quiet:true});await loadGuideProject({quiet:true});}}}
+  finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();}}
+}
 function guideWorkActive() {const c=state.guide.creation;return Boolean(state.guideUploadBusy||state.guideActionBusy||guideProjectActive(state.guideProject)||(!state.guideProject&&c&&!c.error&&['analyzing','generating'].includes(c.status)));}
 function guideCreationStatus(project) {
   if(project.chatStatus==='thinking')return project.chatAction==='save_draft'?'正在准备新版草稿':'正在理解修改要求';
   if(project.chatStatus==='analyzing')return project.chatAction==='create'?'正在策划图文':'正在修改内容';
-  if(project.chatStatus==='generating'||project.status==='generating')return '正在生成图片';
+  if(project.chatStatus==='generating'||project.status==='generating')return project.chatAction==='append_pages'?'正在追加配图':'正在生成图片';
   if(project.status==='analyzing')return '正在策划图文';
   if(project.chatStatus==='error')return '这次修改未完成';
   if(project.chatStatus==='interrupted')return '这次修改已中断';
+  if(project.chatRequests?.at(-1)?.action==='reply')return '已回复，图文未更改';
   if(project.status==='completed'&&project.xhsDelivery?.enabled)return guideDeliveryLabel(project);
   return ({completed:'图文已完成',partial:'部分图片未完成',error:'这次创作未完成',interrupted:'创作已中断',draft:'内容已准备好'}[project.status])||'作品准备中';
 }
@@ -324,16 +356,18 @@ function guideCreationView() {
   const chat=(p.chatMessages||[]).filter(message=>!(message.role==='user'&&(message.action==='create'||message.content===p.source))).slice(-20);
   const pending=last&&['sending','unknown'].includes(last.status)&&!chat.some(message=>message.requestId===last.requestId);
   const issue=['error','interrupted'].includes(p.chatStatus)||['error','partial','interrupted'].includes(p.status)||['failed','blocked','filled','unknown','interrupted'].includes(p.xhsDelivery?.status);
-  const status=p.xhsDelivery?.enabled&&p.status==='completed'&&!guideGenerationActive(p)?guideDeliveryLabel(p):active||issue||!done||done!==pages.length?guideCreationStatus(p):`${done} 张已完成`;
+  const onlyReply=p.chatRequests?.at(-1)?.status==='completed'&&p.chatRequests.at(-1).action==='reply';
+  const status=p.chatStatus==='error'||p.chatRequests?.at(-1)?.status==='error'?'这次修改未完成':onlyReply?'已回复，图文未更改':p.xhsDelivery?.enabled&&p.status==='completed'&&!guideGenerationActive(p)?guideDeliveryLabel(p):active||issue||!done||done!==pages.length?guideCreationStatus(p):`${done} 张已完成`;
   const progress=active||canRetry?`<div class="guide-creation-progress"><strong>${done} / ${pages.length||g.preferences.count||0} 张已完成</strong><span>${active?h(guideDeliveryActive(p)?p.xhsDelivery?.message||'图片已完成，正在送入电脑草稿。':p.logs?.at(-1)?.message||'正在处理，完成后会自动展示。'):pages.length?'已完成的图片会保留，可继续重试其余图片。':'这次尚未生成图片，可以重新开始内容策划。'}</span></div>`:'';
   const downloads=done&&!guideGenerationActive(p)?`<a class="button button-primary" href="/api/projects/${encodeURIComponent(p.id)}/export.zip" download>${icon('download')}下载整组</a>`:'';
   const retryActions=`${canRetry?`<button class="button button-secondary" data-action="guide-retry-images">${icon('refresh')}${pages.length?'重试未完成图片':'重试这次创作'}</button>`:''}${c.error&&!active?'<button class="text-button" data-action="guide-load-result">重新读取结果</button>':''}${last&&last.status==='unknown'&&!active?'<button class="text-button" data-action="guide-chat-retry">确认上次修改结果</button>':''}`;
-  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}"><div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${h(p.title||'这次的图文作品')}</h3></div><span class="guide-creation-status ${issue?'is-warning':''}">${active?'<span class="spinner spinner-small"></span>':icon(issue?'alert':'check')}${h(status)}</span></div>${guideDeliveryView(p)}${progress}${p.error||c.error?`<div class="guide-creation-error" role="alert">${h(c.error||p.error)}</div>`:''}${pages.length?`<div class="guide-creation-grid" data-count="${pages.length}">${pages.map((page,index)=>`<article class="guide-created-page"><div class="guide-created-image" data-aspect="${h(p.aspect)}">${page.imageUrl?`<button data-action="guide-result-preview" data-id="${h(page.id)}" aria-label="查看第 ${index+1} 张完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title||'第 '+(index+1)+' 张图文')}" loading="lazy"><span>${icon('expand')}查看大图</span></button>`:`<div class="guide-created-placeholder">${page.status==='generating'?'<span class="spinner"></span>':icon('image')}<strong>第 ${index+1} 张</strong><span>${page.status==='error'?'这张图片暂未完成':page.status==='generating'?'正在绘制…':'等待生成'}</span></div>`}</div><div class="guide-created-page-footer"><span>${String(index+1).padStart(2,'0')} · ${h(page.title)}</span>${page.imageUrl?`<a href="${h(page.imageUrl)}" download="${h(p.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}" aria-label="下载第 ${index+1} 张图片">${icon('download')}</a>`:''}</div>${page.error?`<p class="guide-created-error">${h(page.error)}</p>`:''}</article>`).join('')}</div>`:''}${p.caption||p.title?`<section class="guide-creation-copy" aria-label="帖子正文"><div class="guide-post-caption"><h4 class="sr-label">帖子正文</h4><p>${h(p.caption||'')}</p></div><div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}${xhsEligible(p)?p.xhsDelivery?.enabled?`<button class="button button-secondary" data-action="guide-xhs-action" data-kind="open-drafts" ${!xhsConnected()||xhsWorking()||guideDeliveryActive(p)||(p.xhsDelivery.accountId&&p.xhsDelivery.accountId!==xhsAccountId())?'disabled':''}>${icon('arrow')}打开电脑草稿</button>`:`<button class="button button-secondary" data-action="xhs-for-project" data-id="${h(p.id)}">${icon('arrow')}送入小红书草稿</button>`:''}</div></section>`:downloads?`<div class="guide-creation-actions">${downloads}</div>`:''}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p></article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
+  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}"><div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${h(p.title||'这次的图文作品')}</h3></div><span class="guide-creation-status ${issue?'is-warning':''}">${active?'<span class="spinner spinner-small"></span>':icon(issue?'alert':'check')}${h(status)}</span></div>${guideDeliveryView(p)}${progress}${p.error||c.error?`<div class="guide-creation-error" role="alert">${h(c.error||p.error)}</div>`:''}${pages.length?`<div class="guide-creation-grid" data-count="${pages.length}">${pages.map((page,index)=>`<article class="guide-created-page"><div class="guide-created-image" data-aspect="${h(p.aspect)}">${page.imageUrl?`<button data-action="guide-result-preview" data-id="${h(page.id)}" aria-label="查看第 ${index+1} 张完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title||'第 '+(index+1)+' 张图文')}" loading="lazy"><span>${icon('expand')}查看大图</span></button>`:`<div class="guide-created-placeholder">${page.status==='generating'?'<span class="spinner"></span>':icon('image')}<strong>第 ${index+1} 张</strong><span>${page.status==='error'?'这张图片暂未完成':page.status==='generating'?'正在绘制…':'等待生成'}</span></div>`}</div><div class="guide-created-page-footer"><span>${String(index+1).padStart(2,'0')} · ${h(page.title)}</span>${page.imageUrl?`<a href="${h(page.imageUrl)}" download="${h(p.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}" aria-label="下载第 ${index+1} 张图片">${icon('download')}</a>`:''}</div>${page.error?`<p class="guide-created-error">${h(page.error)}</p>`:''}</article>`).join('')}</div>`:''}${p.caption||p.title?`<section class="guide-creation-copy" aria-label="帖子正文"><div class="guide-post-caption"><h4 class="sr-label">帖子正文</h4><p>${h(p.caption||'')}</p></div><div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}${xhsEligible(p)&&p.xhsDelivery?.enabled?`<button class="button button-secondary" data-action="guide-xhs-action" data-kind="open-drafts" ${!xhsConnected()||xhsWorking()||guideDeliveryActive(p)||(p.xhsDelivery.accountId&&p.xhsDelivery.accountId!==xhsAccountId())?'disabled':''}>${icon('arrow')}打开电脑草稿</button>`:''}</div></section>`:downloads?`<div class="guide-creation-actions">${downloads}</div>`:''}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p></article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
 }
 
 function setGuideProject(project) {
   const c=state.guide.creation;if(!c||!project?.id||(c.projectId&&project.id!==c.projectId))return;
   c.projectId=project.id;c.status=project.status;c.error='';state.guideProject=project;
+  state.guide.preferences=guidePreferences(project);
   state.guide.referenceImages=normalizeGuideImages(project.referenceImages);
   const last=c.lastChatRequest;
   if(last){const request=project.chatRequests?.find(item=>item.requestId===last.requestId||item.id===last.requestId);if(request)last.status=request.status;else if(project.chatMessages?.some(message=>message.requestId===last.requestId))last.status=guideProjectActive(project)?'running':'completed';if(last.restoredInput&&['running','completed'].includes(last.status)){if(state.guide.input===last.message)state.guide.input='';const sent=new Set(normalizeGuideImages(last.images).map(image=>image.id));state.guide.draftImages=state.guide.draftImages.filter(image=>!sent.has(image.id));last.restoredInput=false;}}
@@ -367,10 +401,10 @@ async function startGuideCreation({command='',retryRequest=false}={}) {
   if(g.selectedTrend&&!guideTrendUsable(g.selectedTrend)){g.selectedTrend=null;g.trendNotice='已选热梗已过 14 天留存期，已移除。请重新选择，或按原主题生成。';saveGuidance();renderGuidance();return notify(g.trendNotice,true);}
   if(!state.config?.configured){g.creationError='需求已整理好。请在模型设置中配置文字和图片模型，回来后告诉我“继续创作”即可。';saveGuidance();renderGuidance();return;}
   const source=guideSourceWithTrend(g);if(source.length>24000)return notify('完整素材加上热点信息超过 24000 字，请精简素材后再生成。原素材会保留。',true);
-  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString()};
+  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString(),capture:{xhsAutoDelivery:g.xhsAutoDelivery===true,...(g.xhsAutoDelivery?{xhsAccountId:xhsAccountId()||null}:{})}};
   if(command&&!retryRequest){g.messages.push({role:'user',content:command});g.messages=trimGuideMessages(g.messages);g.input='';}
   g.creation=c;g.creationError='';c.error='';state.guideActionBusy='create';const version=++guideCreationVersion;saveGuidance();renderGuidance({focusCreation:true});
-  try{const {project}=await api('/api/brief/create',{method:'POST',body:{requestId:c.requestId,source,style:g.preferences.style,aspect:g.preferences.aspect,count:g.preferences.count,mode:g.preferences.mode||'cards',referenceIds:g.referenceImages.map(image=>image.id),xhsAccountId:xhsAccountId()||null}});if(version!==guideCreationVersion||state.guide!==g)return;setGuideProject(project);}
+  try{const {project}=await api('/api/brief/create',{method:'POST',body:{requestId:c.requestId,source,style:g.preferences.style,aspect:g.preferences.aspect,count:g.preferences.count,mode:g.preferences.mode||'cards',referenceIds:g.referenceImages.map(image=>image.id),xhsAutoDelivery:c.capture?.xhsAutoDelivery===true,...(c.capture?.xhsAutoDelivery===true?{xhsAccountId:c.capture.xhsAccountId}: {})}});if(version!==guideCreationVersion||state.guide!==g)return;setGuideProject(project);}
   catch(error){if(version!==guideCreationVersion)return;if(error.status&&error.status>=400&&error.status<500){g.creation=null;g.creationError=error.message;if(command&&!g.input)g.input=command;}else{c.status='unknown';c.error=`${error.message} 上次请求结果尚未确认，可以使用同一请求编号确认结果，不会重复创建。`;}saveGuidance();}
   finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({focusCreation:true});beginGuidePolling();}}
 }
@@ -402,7 +436,7 @@ function resetGuideConversation({confirmExisting=true}={}) {
   if(state.guideBusy||guideWorkActive()){state.view='briefing';renderGuidance({preserve:true});notify('这次创作正在处理中，完成后再开启新创作。');return false;}
   const g=state.guide;
   if(confirmExisting&&(g.messages.length||g.input.trim()||g.draftImages.length||g.creation)&&!confirm(g.creation&&!g.creation.projectId?'上次生成请求的结果还未确认，旧任务可能仍在处理。开启新创作后再次生成将是新的请求。确认开启？当前对话会清空，已有作品保留。':'开启新的创作对话？当前未发送的文字和图片会清空，已有作品会保留在作品记录中。'))return false;
-  ++guideRequestVersion;++guideCreationVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);state.guide=blankGuidance();state.guideProject=null;state.guideEdit=null;state.guideActionBusy='';resetGuideStyleFilters();state.view='briefing';saveGuidance();renderGuidance();loadXhs({quiet:true});return true;
+  ++guideRequestVersion;++guideCreationVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);state.guide=blankGuidance();state.guideProject=null;state.guideEdit=null;state.guideActionBusy='';state.guidePublishPrompt=false;resetGuideStyleFilters();state.view='briefing';saveGuidance();renderGuidance();loadXhs({quiet:true});return true;
 }
 async function resumeProjectInGuide(id) {
   if(state.guide.creation?.projectId===id){state.view='briefing';renderGuidance({preserve:true});await loadGuideProject({quiet:true});return;}
@@ -411,7 +445,7 @@ async function resumeProjectInGuide(id) {
   const {project}=await api(`/api/projects/${encodeURIComponent(id)}`);
   ++guideCreationVersion;++guideRequestVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);
   const g=blankGuidance();g.source=project.source||'';g.analysis='已载入作品，直接告诉我想改哪里即可。';g.preferences=guidePreferences(project);g.recommendations={...g.recommendations,...g.preferences};g.creation={projectId:project.id,requestId:isGuideUuid(project.creationRequestId)?project.creationRequestId:crypto.randomUUID(),status:project.status,error:'',requestedAt:project.createdAt};
-  state.guide=g;state.guideProject=null;state.guideEdit=null;state.view='briefing';setGuideProject(project);renderGuidance({focusCreation:true});beginGuidePolling();await loadXhs({quiet:true});
+  state.guide=g;state.guideProject=null;state.guideEdit=null;state.guidePublishPrompt=false;state.view='briefing';setGuideProject(project);renderGuidance({focusCreation:true});beginGuidePolling();await loadXhs({quiet:true});
 }
 
 function guideTrendUrl(value) {
@@ -646,11 +680,12 @@ function header() {
   const [eyebrow, title, sub] = labels[state.view];
   const modelReady=state.view==='trends'?Boolean(state.trends?.items?.length):['briefing','radar'].includes(state.view)?guideTextReady():state.config?.configured;
   const modelLabel=state.view==='trends'?'公开热榜 · 无需模型':['briefing','radar'].includes(state.view)?(modelReady?'文字模型已配置':'等待配置文字模型'):(modelReady?'模型已配置':'等待配置模型');
-  if(state.view==='xhs')return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span id="xhs-header-connection" class="connection ${xhsConnected()?'connected':''}"><i></i>${xhsConnected()?'小红书已连接':'等待连接小红书'}</span></div></header>`;
+  if(state.view==='xhs')return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span id="xhs-header-connection" class="connection ${xhsConnected()?'connected':''}"><i></i>${xhsConnected()?'小红书已连接':xhsBound()?'已绑定 · 送稿时检查':'等待绑定小红书'}</span></div></header>`;
   if(state.view==='briefing')return `<header class="page-header conversation-page-header"><h1 class="sr-label">创作对话</h1><span class="connection ${modelReady?'connected':''}"><i></i>${modelLabel}</span></header>`;
   return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span class="connection ${modelReady ? 'connected' : ''}"><i></i>${modelLabel}</span>${state.view !== 'briefing' && state.view !== 'settings' ? `<button class="button button-ink" data-action="new">${icon('plus')}新建创作<span class="button-arrow">↗</span></button>` : ''}</div></header>`;
 }
 function render() {
+  if(state.view!=='xhs'&&state.xhsBusy==='draft')++xhsDraftRequestVersion;
   if(state.view!=='trends')clearTimeout(trendsPollTimer);
   if(state.view!=='radar')clearTimeout(radarPollTimer);
   if(!['xhs','briefing'].includes(state.view))clearTimeout(xhsPollTimer);
@@ -659,6 +694,8 @@ function render() {
 const XHS_DRAFT_LABELS = {queued:'等待处理',running:'正在准备电脑草稿',filled:'已填入发布页，待核验',verified:'电脑草稿已核验',unknown:'保存结果待核验',failed:'草稿准备未完成',interrupted:'上次操作已中断'};
 const XHS_CONNECTION_LABELS = {disconnected:'尚未连接',connecting:'正在打开登录',connected:'账号已连接',login_required:'等待本人登录',needs_attention:'需要本人处理',browser_unavailable:'浏览器暂不可用'};
 const xhsConnected = () => state.xhs?.connection?.state==='connected'&&Boolean(state.xhs?.account?.id);
+// Binding remembers the approved account; only connected confirms this session.
+const xhsBound = () => /^[A-Za-z0-9_-]{1,120}$/.test(String(state.xhs?.account?.id||''))&&['connected','needs_attention','login_required','browser_unavailable'].includes(state.xhs?.connection?.state);
 const xhsWorking = () => Boolean(state.xhsBusy||state.xhs?.status?.busy||state.xhs?.sync?.running);
 const xhsDate = value => value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'尚未同步';
 const xhsValue = value => typeof value==='number'&&Number.isFinite(value)?value.toLocaleString('zh-CN'):'未获取';
@@ -677,8 +714,8 @@ function xhsStatusView() {
   return `${busy?`<div class="xhs-notice xhs-working" role="status"><span class="spinner spinner-small"></span><span>${h(status.message||'正在处理小红书操作，请保持专用浏览器打开。')}</span></div>`:''}${error?`<div class="xhs-notice is-error" role="alert">${icon('alert')}<span>${h(error)}</span><button class="text-button" data-action="xhs-reload" ${busy?'disabled':''}>重新读取</button></div>`:''}`;
 }
 function xhsAccountView() {
-  const data=state.xhs,account=data?.account,connection=data?.connection||{},connected=xhsConnected(),busy=xhsWorking(),url=xhsHref(account?.url),label=XHS_CONNECTION_LABELS[connection.state]||'连接状态待确认';
-  return `<section class="panel xhs-account-card"><div class="xhs-account-identity"><span class="xhs-account-avatar" aria-hidden="true">${account?.nickname?h(Array.from(account.nickname)[0]):icon('cards')}</span><div><div class="xhs-account-kicker">小红书 · 电脑端 <span class="xhs-connection-badge ${connected?'is-connected':''}">${h(label)}</span></div><h2>${h(account?.nickname||(connection.state==='connecting'?'在浏览器中连接你的账号':'让账号和作品，在这里相遇'))}</h2>${account?.id?`<p>账号 ID：${h(account.id)}${url?` <a href="${h(url)}" target="_blank" rel="noopener noreferrer">查看主页 ↗</a>`:''}</p>`:'<p>打开专用浏览器，在小红书官方页面扫码登录。</p>'}</div></div><div class="xhs-account-actions">${!connected?`<button class="button button-primary" data-action="xhs-action" data-kind="login" ${busy?'disabled':''}>${icon('plus')}打开浏览器登录</button>`:`<button class="button button-primary" data-action="xhs-action" data-kind="sync" ${busy?'disabled':''}>${icon('refresh')}同步账号数据</button><button class="button button-secondary" data-action="xhs-action" data-kind="open-drafts" ${busy?'disabled':''}>打开电脑草稿 ${icon('arrow')}</button>`}<button class="text-button" data-action="xhs-action" data-kind="check" ${busy?'disabled':''}>${connected?'检查连接':'我已登录，检查连接'}</button>${account||connection.browserOpen?`<button class="text-button xhs-disconnect" data-action="xhs-action" data-kind="disconnect" ${busy?'disabled':''}>断开小红书</button>`:''}</div><div class="xhs-account-help"><span>${icon('lock')}${h(connection.message||(connected?'登录状态保留在本机专用浏览器中。':'登录完成后，点击「检查连接」确认目标账号。'))}</span><small>${account?'断开只关闭专用浏览器和本平台连接，作品会保留。':'无需在平台填写小红书密码或 Cookie。'}</small></div></section>`;
+  const data=state.xhs,account=data?.account,connection=data?.connection||{},connected=xhsConnected(),busy=xhsWorking(),url=xhsHref(account?.url),label=xhsBound()&&!connected?'已绑定 · 送稿时检查':XHS_CONNECTION_LABELS[connection.state]||'连接状态待确认';
+  return `<section class="panel xhs-account-card"><div class="xhs-account-identity"><span class="xhs-account-avatar" aria-hidden="true">${account?.nickname?h(Array.from(account.nickname)[0]):icon('cards')}</span><div><div class="xhs-account-kicker">小红书 · 电脑端 <span class="xhs-connection-badge ${connected?'is-connected':''}">${h(label)}</span></div><h2>${h(account?.nickname||(connection.state==='connecting'?'在浏览器中连接你的账号':'让账号和作品，在这里相遇'))}</h2>${account?.id?`<p>账号 ID：${h(account.id)}${url?` <a href="${h(url)}" target="_blank" rel="noopener noreferrer">查看主页 ↗</a>`:''}</p>`:'<p>打开专用浏览器，在小红书官方页面扫码登录。</p>'}</div></div><div class="xhs-account-actions">${!connected?`<button class="button ${xhsBound()?'button-secondary':'button-primary'}" data-action="xhs-action" data-kind="login" ${busy?'disabled':''}>${icon(xhsBound()?'refresh':'plus')}${xhsBound()?'重新扫码绑定':'打开浏览器登录'}</button>`:`<button class="button button-primary" data-action="xhs-action" data-kind="sync" ${busy?'disabled':''}>${icon('refresh')}同步账号数据</button><button class="button button-secondary" data-action="xhs-action" data-kind="open-drafts" ${busy?'disabled':''}>打开电脑草稿 ${icon('arrow')}</button>`}<button class="text-button" data-action="xhs-action" data-kind="check" ${busy?'disabled':''}>${connected?'检查连接':xhsBound()?'手动检查登录':'我已登录，检查连接'}</button>${account||connection.browserOpen?`<button class="text-button xhs-disconnect" data-action="xhs-action" data-kind="disconnect" ${busy?'disabled':''}>断开小红书</button>`:''}</div><div class="xhs-account-help"><span>${icon('lock')}${h(connection.message||(connected?'登录状态保留在本机专用浏览器中。':'登录完成后，点击「检查连接」确认目标账号。'))}</span><small>${xhsBound()&&!connected?'账号绑定已保存，送稿时自动检查登录。无需先手动检查；失效或验证时按提示处理。':account?'断开只关闭专用浏览器和本平台连接，作品会保留。':'首次扫码完成绑定，无需在平台填写小红书密码或 Cookie。'}</small></div></section>`;
 }
 function xhsMetricsView() {
   const data=state.xhs,account=data?.account,metrics=Array.isArray(data?.metrics)?data.metrics:[],basics=[['粉丝',account?.followers],['关注',account?.following],['获赞与收藏',account?.likes],['笔记数',account?.notesCount]];
@@ -697,7 +734,7 @@ function xhsComposerView() {
   const available=state.projects.filter(xhsEligible),p=available.find(project=>project.id===state.xhsProjectId),preview=state.xhsPreview;
   if(p&&!preview)state.xhsPreview={title:p.title||'',content:p.caption||'',accountId:xhsAccountId()};
   const draft=state.xhsPreview;
-  return `<form id="xhs-draft-form"><label for="xhs-project">选择已完成的作品</label><select id="xhs-project" name="projectId" ${state.xhsBusy==='draft'?'disabled':''}><option value="">选择一份图文…</option>${available.map(project=>`<option value="${h(project.id)}" ${p?.id===project.id?'selected':''}>${h(project.title||'未命名作品')}</option>`).join('')}</select>${!available.length?'<p class="field-help">完成文案和全部图片后，即可在这里选择作品。</p><button type="button" class="text-button" data-action="navigate" data-view="briefing">去创作图文 →</button>':''}${p&&draft?`<div class="xhs-preview-target" id="xhs-preview-target">${xhsConnected()?`${icon('check')}目标账号：${h(state.xhs.account.nickname||state.xhs.account.id)}`:`${icon('lock')}请先连接小红书账号`}</div><div class="xhs-preview-images" aria-label="本次草稿图片，按原作品顺序">${p.pages.map((page,index)=>`<figure><img src="${h(page.imageUrl)}" alt="第 ${index+1} 张：${h(page.title)}" loading="lazy"><figcaption>${String(index+1).padStart(2,'0')}</figcaption></figure>`).join('')}</div><div class="xhs-preview-label"><label for="xhs-title">小红书标题</label><span id="xhs-title-count"></span></div><input id="xhs-title" name="title" value="${h(draft.title)}" placeholder="为这篇图文取个标题" required><div class="xhs-preview-label"><label for="xhs-content">帖子正文</label><span id="xhs-content-count"></span></div><textarea id="xhs-content" name="content" rows="7" placeholder="检查正文和话题，确认后送入草稿">${h(draft.content)}</textarea><p class="field-help">这里的调整只用于本次小红书草稿，原作品会保留。</p><div id="xhs-submit-notice" class="xhs-submit-notice" role="status"></div><button id="xhs-submit-draft" type="submit" class="button button-primary button-full">${icon('arrow')}确认送入电脑草稿</button><p class="xhs-submit-help">会向上方账号上传 ${p.pages.length} 张图片并准备草稿；发布由你在小红书决定。</p>`:'<div class="xhs-composer-empty">'+icon('image')+'<p>选择作品后，先在这里检查图片、标题和正文。</p></div>'}</form>`;
+  return `<form id="xhs-draft-form"><label for="xhs-project">选择已完成的作品</label><select id="xhs-project" name="projectId" ${state.xhsBusy==='draft'?'disabled':''}><option value="">选择一份图文…</option>${available.map(project=>`<option value="${h(project.id)}" ${p?.id===project.id?'selected':''}>${h(project.title||'未命名作品')}</option>`).join('')}</select>${!available.length?'<p class="field-help">完成文案和全部图片后，即可在这里选择作品。</p><button type="button" class="text-button" data-action="navigate" data-view="briefing">去创作图文 →</button>':''}${p&&draft?`<div class="xhs-preview-target" id="xhs-preview-target">${xhsBound()?`${icon(xhsConnected()?'check':'lock')}目标账号：${h(state.xhs.account.nickname||state.xhs.account.id)}${xhsConnected()?'':' · 送稿时自动检查登录'}`:`${icon('lock')}请先扫码绑定小红书账号`}</div><div class="xhs-preview-images" aria-label="本次草稿图片，按原作品顺序">${p.pages.map((page,index)=>`<figure><img src="${h(page.imageUrl)}" alt="第 ${index+1} 张：${h(page.title)}" loading="lazy"><figcaption>${String(index+1).padStart(2,'0')}</figcaption></figure>`).join('')}</div><div class="xhs-preview-label"><label for="xhs-title">小红书标题</label><span id="xhs-title-count"></span></div><input id="xhs-title" name="title" ${state.xhsBusy==='draft'?'disabled':''} value="${h(draft.title)}" placeholder="为这篇图文取个标题" required><div class="xhs-preview-label"><label for="xhs-content">帖子正文</label><span id="xhs-content-count"></span></div><textarea id="xhs-content" name="content" rows="7" ${state.xhsBusy==='draft'?'disabled':''} placeholder="检查正文和话题，确认后送入草稿">${h(draft.content)}</textarea><p class="field-help">这里的调整只用于本次小红书草稿，原作品会保留。</p><div id="xhs-submit-notice" class="xhs-submit-notice" role="status"></div><button id="xhs-submit-draft" type="submit" class="button button-primary button-full">${icon('arrow')}确认送入电脑草稿</button><p class="xhs-submit-help">会向上方账号上传 ${p.pages.length} 张图片并准备草稿；发布由你在小红书决定。</p>`:'<div class="xhs-composer-empty">'+icon('image')+'<p>选择作品后，先在这里检查图片、标题和正文。</p></div>'}</form>`;
 }
 function xhsDraftsView() {
   const drafts=(state.xhs?.drafts||[]).filter(draft=>draft.accountId===xhsAccountId());
@@ -714,11 +751,12 @@ function acceptXhs(payload) {
 }
 function updateXhsComposerState() {
   const preview=state.xhsPreview,form=document.querySelector('#xhs-draft-form');if(!preview||!form)return;
+  form.querySelectorAll('select,input,textarea').forEach(input=>{input.disabled=state.xhsBusy==='draft';});
   const titleLength=Array.from(preview.title).length,contentLength=Array.from(preview.content).length,existing=xhsExistingDraft(),previous=(state.xhs?.drafts||[]).find(draft=>draft.projectId===state.xhsProjectId&&draft.accountId===xhsAccountId());
   [['#xhs-title-count',titleLength,20],['#xhs-content-count',contentLength,1000]].forEach(([selector,count,max])=>{const el=form.querySelector(selector);if(el){el.textContent=`${count} / ${max}`;el.classList.toggle('is-error',count>max);}});
-  const valid=xhsConnected()&&preview.accountId===xhsAccountId()&&preview.title.trim()&&titleLength<=20&&contentLength<=1000&&!xhsWorking()&&!existing;
-  const button=form.querySelector('#xhs-submit-draft');if(button){button.disabled=!valid;button.innerHTML=state.xhsBusy==='draft'?'<span class="spinner spinner-small"></span>正在准备':existing?'这份作品已有待核验草稿':icon('arrow')+(previous?.status==='verified'?'准备当前版本的电脑草稿':'确认送入电脑草稿');}
-  const note=form.querySelector('#xhs-submit-notice');if(note){note.textContent=existing?`这份作品${XHS_DRAFT_LABELS[existing.status]||'已有草稿记录'}，请打开电脑草稿核对，避免重复送出。`:!xhsConnected()?'先连接并确认小红书账号，再送入草稿。':titleLength>20?'标题超过 20 字，请调整后再送出。':contentLength>1000?'正文超过 1000 字，请调整后再送出。':!preview.title.trim()?'请填写小红书标题。':previous?.status==='verified'?'已有电脑草稿已核验。相同内容会复用记录；调整标题、正文或图片后会另存新版，原草稿不会被覆盖。':previous?.status==='failed'?'这份作品有未完成的草稿记录。同一版本请在下方查看原因或重新准备；修改内容可另存新版。':'';note.classList.toggle('is-error',titleLength>20||contentLength>1000);note.hidden=!note.textContent;}
+  const valid=xhsBound()&&preview.accountId===xhsAccountId()&&preview.title.trim()&&titleLength<=20&&contentLength<=1000&&!xhsWorking()&&!existing;
+  const button=form.querySelector('#xhs-submit-draft');if(button){button.disabled=!valid;button.innerHTML=state.xhsBusy==='draft'?'<span class="spinner spinner-small"></span>'+(!xhsConnected()?'正在检查绑定账号':'正在准备'):existing?'这份作品已有待核验草稿':icon('arrow')+(!xhsConnected()&&xhsBound()?'检查登录并送入草稿':previous?.status==='verified'?'准备当前版本的电脑草稿':'确认送入电脑草稿');}
+  const note=form.querySelector('#xhs-submit-notice');if(note){note.textContent=existing?`这份作品${XHS_DRAFT_LABELS[existing.status]||'已有草稿记录'}，请打开电脑草稿核对，避免重复送出。`:!xhsBound()?'首次使用请先扫码绑定小红书账号。':titleLength>20?'标题超过 20 字，请调整后再送出。':contentLength>1000?'正文超过 1000 字，请调整后再送出。':!preview.title.trim()?'请填写小红书标题。':!xhsConnected()?'账号已绑定。本次点击将自动检查保存的登录状态，通过后送稿；需要重新登录时会提示。':previous?.status==='verified'?'已有电脑草稿已核验。相同内容会复用记录；调整标题、正文或图片后会另存新版，原草稿不会被覆盖。':previous?.status==='failed'?'这份作品有未完成的草稿记录。同一版本请在下方查看原因或重新准备；修改内容可另存新版。':'';note.classList.toggle('is-error',titleLength>20||contentLength>1000);note.hidden=!note.textContent;}
 }
 function updateXhs() {
   if(state.view==='briefing'){updateGuideXhs();return;}
@@ -732,8 +770,8 @@ function updateXhs() {
   if(priorSelection!==state.xhsProjectId||!select){const target=page.querySelector('#xhs-composer-region');if(target)target.innerHTML=xhsComposerView();}
   const time=page.querySelector('#xhs-sync-time');if(time)time.textContent=xhsDate(state.xhs.sync?.lastSyncAt);
   const count=page.querySelector('#xhs-notes-count');if(count)count.textContent=`${state.xhs.notes?.length||0} 篇已读取`;
-  const connection=document.querySelector('#xhs-header-connection');if(connection){connection.classList.toggle('connected',xhsConnected());connection.innerHTML='<i></i>'+(xhsConnected()?'小红书已连接':'等待连接小红书');}
-  const target=page.querySelector('#xhs-preview-target');if(target)target.textContent=xhsConnected()?`目标账号：${state.xhs.account.nickname||state.xhs.account.id}`:'请先连接小红书账号';
+  const connection=document.querySelector('#xhs-header-connection');if(connection){connection.classList.toggle('connected',xhsConnected());connection.innerHTML='<i></i>'+(xhsConnected()?'小红书已连接':xhsBound()?'已绑定 · 送稿时检查':'等待绑定小红书');}
+  const target=page.querySelector('#xhs-preview-target');if(target)target.textContent=xhsBound()?`目标账号：${state.xhs.account.nickname||state.xhs.account.id}${xhsConnected()?'':' · 送稿时自动检查登录'}`:'请先扫码绑定小红书账号';
   updateXhsComposerState();
 }
 function scheduleXhsPoll() {
@@ -751,10 +789,12 @@ async function loadXhs({quiet=false,refreshProjects=false}={}) {
   finally{if(version===xhsLoadVersion){state.xhsLoading=false;scheduleXhsPoll();}}
 }
 function chooseXhsProject(id) {
+  ++xhsDraftRequestVersion;
   const p=state.projects.find(project=>project.id===id&&xhsEligible(project));state.xhsProjectId=p?.id||'';state.xhsPreview=p?{title:p.title||'',content:p.caption||'',accountId:xhsAccountId()}:null;
   const target=document.querySelector('#xhs-composer-region');if(target)target.innerHTML=xhsComposerView();updateXhsComposerState();
 }
 async function openXhsForProject(id) {
+  ++xhsDraftRequestVersion;
   const p=state.projects.find(project=>project.id===id)||state.guideProject;if(!p||p.id!==id||!xhsEligible(p))return notify('请等文案和全部图片完成后，再准备小红书草稿。',true);
   state.xhsProjectId=id;state.xhsPreview={title:p.title||'',content:p.caption||'',accountId:xhsAccountId()};state.view='xhs';const url=new URL(location.href);url.searchParams.set('view','xhs');window.history.replaceState({},'',url);render();updateXhsComposerState();await loadXhs({quiet:true,refreshProjects:true});document.querySelector('#xhs-composer-region')?.scrollIntoView({behavior:'smooth',block:'start'});
 }
@@ -765,14 +805,47 @@ async function runXhsAction(kind) {
   catch(error){state.xhsError=error.message;notify(error.message,true);}
   finally{state.xhsBusy='';updateXhs();scheduleXhsPoll();}
 }
+async function checkBoundXhsForDraft(accountId,isCurrent) {
+  if(!isCurrent())return false;
+  acceptXhs(await api('/api/xhs/check',{method:'POST',body:{}}));
+  const deadline=Date.now()+45000;
+  for(;;){
+    if(!isCurrent())return false;
+    if(!xhsBound()||xhsAccountId()!==accountId)throw new Error('绑定账号已变化，本次没有送稿。请重新选择作品并确认账号。');
+    updateXhs();
+    if(!state.xhs?.status?.busy){
+      if(xhsConnected())return true;
+      throw new Error(state.xhs?.connection?.message||'保存的登录状态需要重新验证，请扫码登录后再次送稿。');
+    }
+    if(Date.now()>=deadline)throw new Error('登录检查仍在处理中，本次没有送稿。完成后可再次点击送稿。');
+    await new Promise(resolve=>setTimeout(resolve,750));
+    if(!isCurrent())return false;
+    const snapshot=await api('/api/xhs');
+    if(!isCurrent())return false;
+    acceptXhs(snapshot);
+  }
+}
 async function submitXhsDraft() {
   const preview=state.xhsPreview,p=state.projects.find(project=>project.id===state.xhsProjectId);if(!preview||!xhsEligible(p)||xhsWorking())return;
-  if(!xhsConnected()||preview.accountId!==xhsAccountId())return notify('账号连接已变化，请重新检查登录并选择作品。',true);
+  if(!xhsBound()||preview.accountId!==xhsAccountId())return notify('账号绑定已变化，请重新选择作品并核对目标账号。',true);
   if(!preview.title.trim()||Array.from(preview.title).length>20||Array.from(preview.content).length>1000)return updateXhsComposerState();
   if(xhsExistingDraft())return notify('这份作品已有草稿记录，请先打开电脑草稿核对。',true);
   const body={projectId:p.id,accountId:preview.accountId,title:preview.title,content:preview.content};
+  const operation=++xhsDraftRequestVersion;
+  const isCurrent=()=>operation===xhsDraftRequestVersion&&state.view==='xhs'&&state.xhsProjectId===p.id&&state.xhsPreview===preview&&preview.accountId===body.accountId&&preview.title===body.title&&preview.content===body.content;
   ++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='draft';state.xhsError='';updateXhs();
-  try{const result=await api('/api/xhs/drafts',{method:'POST',body});acceptXhs(result);const status=result.draft?.status;notify(status==='verified'?'电脑草稿已核验。':status==='failed'?'这份草稿尚未准备完成，请查看下方原因。':['unknown','filled','interrupted'].includes(status)?'上次保存结果仍需核对，请打开电脑草稿检查。':'草稿任务已提交，可在下方查看处理结果。',['failed','unknown','interrupted'].includes(status));}
+  try{
+    if(!xhsConnected()){
+      if(!await checkBoundXhsForDraft(body.accountId,isCurrent))return;
+      if(!isCurrent())return;
+      const {project:current}=await api(`/api/projects/${encodeURIComponent(p.id)}`);
+      if(!isCurrent())return;
+      if(!xhsEligible(current)||current.title!==p.title||current.caption!==p.caption||JSON.stringify(current.pages.map(page=>page.imageUrl))!==JSON.stringify(p.pages.map(page=>page.imageUrl)))throw new Error('检查期间原作品已更新，本次没有送稿。请重新选择作品并确认最新内容。');
+    }
+    if(!isCurrent())return;
+    if(!xhsConnected()||xhsAccountId()!==body.accountId||state.xhs?.status?.busy||xhsExistingDraft(p.id))throw new Error('账号或草稿状态已变化，本次没有送稿，请重新核对。');
+    const result=await api('/api/xhs/drafts',{method:'POST',body});acceptXhs(result);const status=result.draft?.status;notify(status==='verified'?'电脑草稿已核验。':status==='failed'?'这份草稿尚未准备完成，请查看下方原因。':['unknown','filled','interrupted'].includes(status)?'上次保存结果仍需核对，请打开电脑草稿检查。':'草稿任务已提交，可在下方查看处理结果。',['failed','unknown','interrupted'].includes(status));
+  }
   catch(error){state.xhsError=error.message;notify(error.message,true);if(error.status===409){const previousAccount=xhsAccountId();await loadXhs({quiet:true});if(previousAccount===xhsAccountId())state.xhsError=error.message;}}
   finally{state.xhsBusy='';updateXhs();scheduleXhsPoll();}
 }
@@ -1195,6 +1268,10 @@ app.addEventListener('drop', event => {
 });
 app.addEventListener('change', async event => {
   const el=event.target;
+  if(el.id==='guide-xhs-auto-delivery'){
+    if(state.guide.creation)return;
+    state.guide.xhsAutoDelivery=el.checked;saveGuidance();renderGuidance({preserve:true});return;
+  }
   if(el.id==='xhs-project'){chooseXhsProject(el.value);return;}
   if(el.dataset.radarMaterialInput){const files=Array.from(el.files||[]);el.value='';await addRadarReferences(files,el.dataset.radarMaterialInput);}
   if(el.dataset.radarSkipField&&state.radarSkipDrafts[el.dataset.opportunityId])state.radarSkipDrafts[el.dataset.opportunityId][el.dataset.radarSkipField]=el.value;
@@ -1237,6 +1314,7 @@ app.addEventListener('click', async event => {
     if(action==='xhs-action'||action==='guide-xhs-action')await runXhsAction(button.dataset.kind);
     if(action==='guide-xhs-continue')await continueGuideXhsDelivery();
     if(action==='guide-xhs-version')await saveGuideXhsVersion();
+    if(action==='guide-xhs-first')await saveGuideFirstXhsDraft(button.dataset.accountId);
     if(action==='guide-xhs-recheck')await recheckXhsDraft(id,{fromGuide:true});
     if(action==='xhs-for-project')await openXhsForProject(id);
     if(action==='xhs-retry')await retryXhsDraft(id);
