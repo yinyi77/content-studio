@@ -8,7 +8,7 @@ const GUIDE_STYLES = IMAGE_STYLES;
 const GUIDE_IMAGE_LIMIT = 4;
 const GUIDE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
 const state = {
-  view: ['trends','radar','xhs'].includes(new URLSearchParams(location.search).get('view')) ? new URLSearchParams(location.search).get('view') : 'briefing', config: null, projects: [],
+  view: ['trends','radar','xhs','dingtalk'].includes(new URLSearchParams(location.search).get('view')) ? new URLSearchParams(location.search).get('view') : 'briefing', config: null, projects: [],
   busy: '', search: '', filter: 'all',
   models: { text: [], image: [] }, testResults: {}, bootError: '',
   guide: restoreGuidance(), guideBusy: false, guideEdit: null, guideProject: null, guideActionBusy: '', guidePublishPrompt: false,
@@ -19,6 +19,7 @@ const state = {
   radar: null, radarLoading: false, radarError: '', radarBusy: '', radarFilter: 'pending', radarReferences: [], radarUploadBusy: false,
   radarMaterialReferences: {}, radarSkipDrafts: {}, radarNotificationBusy: '',
   xhs: null, xhsLoading: false, xhsError: '', xhsBusy: '', xhsProjectId: '', xhsPreview: null,
+  dingtalk: null, dingtalkLoading: false, dingtalkError: '', dingtalkActionError: '', dingtalkBusy: '', dingtalkDraft: null, dingtalkDirty: false, dingtalkTest: null,
 };
 let toastTimer;
 let guideRequestVersion = 0;
@@ -32,6 +33,8 @@ let radarLoadVersion = 0;
 let xhsPollTimer;
 let xhsLoadVersion = 0;
 let xhsDraftRequestVersion = 0;
+let dingtalkPollTimer;
+let dingtalkLoadVersion = 0;
 
 const paths = {
   spark: '<path d="m12 3 2.4 6.6L21 12l-6.6 2.4L12 21l-2.4-6.6L3 12l6.6-2.4Z"/><path d="m20 2 .6 1.4L22 4l-1.4.6L20 6l-.6-1.4L18 4l1.4-.6Z"/>',
@@ -664,7 +667,7 @@ function notify(message, error = false) {
   toastTimer = setTimeout(() => { toastEl.hidden = true; }, error ? 6500 : 3500);
 }
 function sidebar() {
-  const links = [['briefing','创作对话','对话','01'],['radar','选题雷达','雷达','02'],['trends','当下热点','热点','03'],['xhs','小红书账号','小红书','04'],['history','作品记录','作品','05'],['settings','模型设置','模型','06']];
+  const links = [['briefing','创作对话','对话','01'],['radar','选题雷达','雷达','02'],['trends','当下热点','热点','03'],['xhs','小红书账号','小红书','04'],['dingtalk','钉钉接入','钉钉','05'],['history','作品记录','作品','06'],['settings','模型设置','模型','07']];
   const newConversation=state.view==='briefing'&&(state.guide.creation||state.guide.messages.length||state.guide.draftImages.length)?`<button type="button" class="header-new button button-secondary" data-action="guide-new" aria-label="新建对话" ${guideWorkActive()||state.guideBusy?'disabled':''}>${icon('plus')}<span class="header-new-label">新建对话</span></button>`:'';
   return `<header class="site-header"><a href="#" class="brand" data-action="navigate" data-view="briefing" aria-label="图文工坊首页"><span class="brand-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span>图文工坊<small>THE CONTENT ATELIER</small></span></a><nav class="main-nav" aria-label="主要导航">${links.map(([view,label,short,index]) => `<button class="nav-item ${state.view === view ? 'active' : ''}" data-action="navigate" data-view="${view}" aria-label="${label}" ${state.view === view ? 'aria-current="page"' : ''}><span class="nav-full-label">${label}</span><span class="nav-short-label">${short}</span><small>${index}</small>${view === 'history' && state.projects.length ? `<span class="nav-count">${state.projects.length}</span>` : ''}</button>`).join('')}</nav><div class="header-end">${newConversation}<span class="local-indicator"><i></i>本地工作空间</span><span class="avatar" aria-label="个人创作空间">我</span></div></header>`;
 }
@@ -674,6 +677,7 @@ function header() {
     trends:['A PULSE OF WHAT PEOPLE ARE TALKING ABOUT.','捕捉当下，<span>找到新的灵感<i>。</i></span>','看看大家正在聊什么，把好话题变成你的内容。'],
     radar:['YOUR NEXT STORY, ALREADY IN SIGHT.','选题交给我，<span>决定留给你<i>。</i></span>','结合你的产品资料与当下热点，找到值得做的一篇。'],
     xhs:['YOUR CONTENT, READY FOR THE NEXT STEP.','连接账号，<span>把作品送往下一站<i>。</i></span>','同步账号可见数据，让图文在电脑草稿里继续打磨。'],
+    dingtalk:['YOUR NEXT IDEA, JUST A MESSAGE AWAY.','把创作对话，<span>带到钉钉里<i>。</i></span>','私聊直接发需求，群聊 @ 机器人，文案和图片回到原会话。'],
     history:['YOUR CREATIVE COLLECTION','让作品，<span>慢慢积累<i>。</i></span>','每一次认真表达，都值得留下。'],
     settings:['TOOLS FOR YOUR NEXT IDEA','让工具，<span>顺手起来<i>。</i></span>','连接你自己的文字与图片模型。'],
   };
@@ -681,6 +685,7 @@ function header() {
   const modelReady=state.view==='trends'?Boolean(state.trends?.items?.length):['briefing','radar'].includes(state.view)?guideTextReady():state.config?.configured;
   const modelLabel=state.view==='trends'?'公开热榜 · 无需模型':['briefing','radar'].includes(state.view)?(modelReady?'文字模型已配置':'等待配置文字模型'):(modelReady?'模型已配置':'等待配置模型');
   if(state.view==='xhs')return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span id="xhs-header-connection" class="connection ${xhsConnected()?'connected':''}"><i></i>${xhsConnected()?'小红书已连接':xhsBound()?'已绑定 · 送稿时检查':'等待绑定小红书'}</span></div></header>`;
+  if(state.view==='dingtalk')return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span id="dingtalk-header-connection" class="connection ${dingtalkConnected()?'connected':''}"><i></i>${dingtalkConnected()?'Stream 已连接':'等待连接钉钉'}</span></div></header>`;
   if(state.view==='briefing')return `<header class="page-header conversation-page-header"><h1 class="sr-label">创作对话</h1><span class="connection ${modelReady?'connected':''}"><i></i>${modelLabel}</span></header>`;
   return `<header class="page-header"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><p>${sub}</p></div><div class="header-actions"><span class="connection ${modelReady ? 'connected' : ''}"><i></i>${modelLabel}</span>${state.view !== 'briefing' && state.view !== 'settings' ? `<button class="button button-ink" data-action="new">${icon('plus')}新建创作<span class="button-arrow">↗</span></button>` : ''}</div></header>`;
 }
@@ -688,8 +693,98 @@ function render() {
   if(state.view!=='xhs'&&state.xhsBusy==='draft')++xhsDraftRequestVersion;
   if(state.view!=='trends')clearTimeout(trendsPollTimer);
   if(state.view!=='radar')clearTimeout(radarPollTimer);
+  if(state.view!=='dingtalk')clearTimeout(dingtalkPollTimer);
   if(!['xhs','briefing'].includes(state.view))clearTimeout(xhsPollTimer);
-  app.innerHTML = `<div class="app-shell view-${state.view}">${sidebar()}<main class="main">${header()}${state.bootError ? `<div class="banner banner-error">${icon('alert')}<span>${h(state.bootError)}</span><button class="text-button" data-action="reload">重试连接</button></div>` : ''}${state.view === 'briefing' ? guidanceView() : state.view === 'radar' ? radarView() : state.view === 'xhs' ? xhsView() : state.view === 'trends' ? trendsView() : state.view === 'history' ? historyView() : settingsView()}<footer class="main-footer"><span>图文工坊 <i>©</i> ${new Date().getFullYear()}</span><span>一个给好内容的创作空间。</span><span>MADE FOR YOUR NEXT IDEA.</span></footer></main></div>`;
+  app.innerHTML = `<div class="app-shell view-${state.view}">${sidebar()}<main class="main">${header()}${state.bootError ? `<div class="banner banner-error">${icon('alert')}<span>${h(state.bootError)}</span><button class="text-button" data-action="reload">重试连接</button></div>` : ''}${state.view === 'briefing' ? guidanceView() : state.view === 'radar' ? radarView() : state.view === 'xhs' ? xhsView() : state.view === 'dingtalk' ? dingtalkView() : state.view === 'trends' ? trendsView() : state.view === 'history' ? historyView() : settingsView()}<footer class="main-footer"><span>图文工坊 <i>©</i> ${new Date().getFullYear()}</span><span>一个给好内容的创作空间。</span><span>MADE FOR YOUR NEXT IDEA.</span></footer></main></div>`;
+}
+const DINGTALK_STATES = {disconnected:'尚未连接',connecting:'正在连接 Stream',connected:'Stream 已连接',reconnecting:'正在重新连接',error:'连接需要处理',not_configured:'等待配置',stopped:'连接已停止'};
+const DINGTALK_STAGES = {idle:'等待需求',clarifying:'等待补充信息',generating:'正在生成图文',completed:'图文已完成',partial:'部分图片未完成',interrupted:'任务已中断',error:'任务需要处理'};
+const DINGTALK_DELIVERIES = {pending:'等待回传',sending:'正在回传',accepted:'钉钉已接收',partial:'部分图片未回传',failed:'回传失败',unknown:'回传结果待核实'};
+const dingtalkConnected = () => state.dingtalk?.status?.state==='connected';
+const dingtalkWorking = () => Boolean(state.dingtalkBusy||state.dingtalk?.status?.busy);
+const dingtalkDate = value => value&&Number.isFinite(Date.parse(value))?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'暂无';
+const dingtalkProjectId = value => typeof value==='string'&&/^[A-Za-z0-9_-]{1,120}$/.test(value)?value:'';
+function dingtalkDraftFromConfig(config={}) {
+  return {clientId:config.clientId||'',clientSecret:'',robotCode:config.robotCode||'',corpId:config.corpId||'',allowedUserIds:(config.allowedUserIds||[]).join('\n'),matchTrends:config.matchTrends!==false,groupEnabled:config.groupEnabled===true,clearSecret:false};
+}
+function dingtalkView() {
+  if(!state.dingtalk)return `<section id="dingtalk-page" class="dingtalk-page"><div class="panel dingtalk-loading" role="status">${state.dingtalkLoading?'<span class="spinner"></span>':''}<h2>${state.dingtalkError?'暂时没有读到钉钉配置':'正在准备钉钉接入'}</h2><p>${h(state.dingtalkError||'读取本地配置与连接状态…')}</p>${state.dingtalkError?'<button class="button button-secondary" data-action="dingtalk-reload">重新读取</button>':''}</div></section>`;
+  const draft=state.dingtalkDraft||(state.dingtalkDraft=dingtalkDraftFromConfig(state.dingtalk.config)),config=state.dingtalk.config;
+  return `<section id="dingtalk-page" class="dingtalk-page" aria-label="钉钉接入设置"><div id="dingtalk-status-region" aria-live="polite">${dingtalkStatusView()}</div><div class="dingtalk-layout"><section class="panel dingtalk-config-panel"><div class="dingtalk-section-heading"><div><span class="eyebrow">ONE CONVERSATION. THE WHOLE WORKFLOW.</span><h2>连接你的钉钉机器人</h2></div><span id="dingtalk-scope-label" class="dingtalk-scope-tag">${config.groupEnabled===true?'私聊 · 群聊 @':'私聊已启用'}</span></div><p class="dingtalk-intro">保存应用凭证，再手动开启连接。原有网页创作、作品记录和小红书送稿继续保留。</p><form id="dingtalk-config-form" autocomplete="off"><fieldset class="dingtalk-fields"><legend class="sr-label">钉钉应用配置</legend><div class="dingtalk-field-pair"><div><label for="dingtalk-client-id">Client ID / AppKey</label><input id="dingtalk-client-id" name="clientId" value="${h(draft.clientId)}" placeholder="企业内部应用的 AppKey" autocomplete="off" maxlength="200" required></div><div><label for="dingtalk-robot-code">Robot Code</label><input id="dingtalk-robot-code" name="robotCode" value="${h(draft.robotCode)}" placeholder="机器人 RobotCode" autocomplete="off" maxlength="200" required></div></div><div class="dingtalk-secret-label"><label for="dingtalk-client-secret">Client Secret / AppSecret</label><span id="dingtalk-secret-status">${config.hasSecret?'凭证已保存':'尚未保存凭证'}</span></div><input id="dingtalk-client-secret" name="clientSecret" type="password" value="${h(draft.clientSecret)}" placeholder="${config.hasSecret?'留空保留现有凭证；填写则替换':'输入应用的 AppSecret'}" autocomplete="new-password" maxlength="500" spellcheck="false"><p class="field-help">凭证由本地服务保存，不会回显，也不写入浏览器存储。</p><label id="dingtalk-clear-secret-label" class="dingtalk-check dingtalk-clear-secret" ${config.hasSecret?'':'hidden'}><input type="checkbox" name="clearSecret" ${draft.clearSecret?'checked':''}>清除已保存的 Secret</label><label for="dingtalk-corp-id">组织 CorpId</label><input id="dingtalk-corp-id" name="corpId" value="${h(draft.corpId)}" placeholder="应用所属组织的 CorpId" autocomplete="off" maxlength="200" required><label for="dingtalk-allowed-users">允许使用的成员 UserID</label><textarea id="dingtalk-allowed-users" name="allowedUserIds" rows="3" maxlength="6000" placeholder="先填写自己的员工 UserID，每行一个" required>${h(draft.allowedUserIds)}</textarea><p class="field-help">填写同一组织内的员工 UserID，不是昵称或手机号。首期建议只添加自己，其他成员消息不会触发生成。</p><label class="dingtalk-check dingtalk-group-option"><input id="dingtalk-group-enabled" type="checkbox" name="groupEnabled" ${draft.groupEnabled?'checked':''}><span>允许在群聊中创作（需 @ 机器人）<small>只处理上方已授权成员的群内 @ 消息，文案和图片回复到原群。每个群、每位成员的创作分开保存。</small></span></label><p class="field-help dingtalk-group-help">先将应用机器人加入同组织内部群，并确认应用可见范围包含自己。保存配置后重新连接；每次发需求、补充信息或改稿都需要 @。</p><label class="dingtalk-check dingtalk-trends-option"><input type="checkbox" name="matchTrends" ${draft.matchTrends?'checked':''}><span>为创作需求匹配相关热点<small>沿用平台现有热点资料，找到相关选题时一起参考。</small></span></label></fieldset><div class="dingtalk-save-row"><span id="dingtalk-draft-state" role="status">${state.dingtalkDirty?'有未保存的修改':'使用本地已保存配置'}</span><button type="submit" id="dingtalk-save" class="button button-primary">${icon('check')}保存配置</button></div><p class="dingtalk-save-help">保存不会自动连接。修改已连接应用的配置后，请重新开启连接。</p></form></section><aside class="dingtalk-guide"><section class="panel dingtalk-setup-panel"><div class="dingtalk-section-heading"><div><span class="eyebrow">A FEW THINGS TO PREPARE</span><h2>首次接入，照着做</h2></div>${icon('file')}</div><ol class="dingtalk-setup-steps"><li><span>01</span><div><strong>创建企业内部应用</strong><p>在<a href="https://open-dev.dingtalk.com/" target="_blank" rel="noopener noreferrer">钉钉开发者后台 ↗</a>选择你的组织，创建企业内部应用，添加机器人能力。</p></div></li><li><span>02</span><div><strong>开启机器人 Stream 模式</strong><p>在消息接收模式选择 Stream，无需填写公网回调地址。复制 AppKey、AppSecret 和 RobotCode。</p></div></li><li><span>03</span><div><strong>填写组织与成员范围</strong><p>从企业与应用信息中获取 CorpId，确认自己的员工 UserID；将应用可见范围先设为自己。</p></div></li><li><span>04</span><div><strong>开通权限并发布内部版本</strong><p>按后台提示开通机器人消息发送、接收图片及媒体上传所需权限，发布版本。保存本页配置后测试凭证，再开启连接。</p></div></li></ol><a class="dingtalk-doc-link" href="https://open-dingtalk.github.io/developerpedia/docs/learn/stream/overview/" target="_blank" rel="noopener noreferrer">查看官方 Stream 接入说明 ${icon('arrow')}</a></section><section class="dingtalk-chat-note"><div class="dingtalk-note-icon">${icon('spark')}</div><h3>接好以后，只管说想法</h3><p class="dingtalk-example">“用这张产品图，做一组面向开发者的宣传图文。”</p><p>私聊可以直接发送文字和产品图；群聊开启后，在同组织内部群里 @ 机器人发需求。每次补充和修改也需要 @，完成后文案和图片回到原群。</p><p class="dingtalk-group-image-help">群里的图片也需通过带 @ 的消息送达。普通群消息中的图片不会被读取；产品图建议和需求一起发送，或直接在私聊中使用。</p><span>${icon('lock')}本机服务需持续运行，电脑保持联网、避免休眠。</span></section></aside></div><div id="dingtalk-recent-region" class="dingtalk-recent" aria-live="polite">${dingtalkRecentView()}</div></section>`;
+}
+function dingtalkStatusView() {
+  const snapshot=state.dingtalk,status=snapshot.status||{},connected=dingtalkConnected(),busy=dingtalkWorking(),changing=['connecting','reconnecting'].includes(status.state),ready=snapshot.readiness?.configured===true,missing=snapshot.readiness?.missing||[],canStart=ready&&!state.dingtalkDirty&&!busy&&!changing&&!connected;
+  return `<section class="panel dingtalk-connection-card"><div class="dingtalk-connection-main"><span class="dingtalk-connection-icon ${connected?'is-connected':''}">${changing?'<span class="spinner spinner-small"></span>':icon(connected?'check':'bolt')}</span><div><div class="dingtalk-connection-kicker">钉钉 Stream 连接 <span class="dingtalk-status-badge ${connected?'is-connected':''}">${h(DINGTALK_STATES[status.state]||'连接状态待确认')}</span></div><h2>${connected?'创作入口，已经连到钉钉':changing?'正在和钉钉建立连接':'把一句话，变成一份完整图文'}</h2><p>${h(status.message||(ready?'应用配置已保存，连接后可接收已授权成员的创作消息。':'先在下方填写应用信息与允许使用的成员。'))}</p></div></div><div class="dingtalk-connection-actions"><button type="button" class="button button-secondary" data-action="dingtalk-action" data-kind="test" ${!ready||busy||state.dingtalkDirty?'disabled':''}>${state.dingtalkBusy==='test'?'<span class="spinner spinner-small"></span>':icon('bolt')}测试凭证</button>${connected||changing?`<button type="button" class="button button-secondary" data-action="dingtalk-action" data-kind="disconnect" ${state.dingtalkBusy?'disabled':''}>${state.dingtalkBusy==='disconnect'?'<span class="spinner spinner-small"></span>':''}断开连接</button>`:`<button type="button" class="button button-primary" data-action="dingtalk-action" data-kind="connect" ${canStart?'':'disabled'}>${state.dingtalkBusy==='connect'?'<span class="spinner spinner-small"></span>':icon('arrow')}开启连接</button>`}<button type="button" class="text-button" data-action="dingtalk-reload" ${state.dingtalkBusy?'disabled':''}>${icon('refresh')}刷新状态</button></div><div class="dingtalk-connection-meta"><span>最近消息 <strong>${h(dingtalkDate(status.lastMessageAt))}</strong></span><span>${connected?`本次连接 ${h(dingtalkDate(status.connectedAt))}`:'测试凭证不会发消息，也不会调用模型。'}</span></div>${state.dingtalkDirty?'<p class="dingtalk-inline-notice">配置有修改，请先保存后再测试或开启连接。</p>':!ready?`<p class="dingtalk-inline-notice">${h(missing.length?'待完善：'+missing.map(item=>({clientId:'AppKey',clientSecret:'AppSecret',robotCode:'RobotCode',corpId:'CorpId',allowedUserIds:'成员 UserID'}[item]||item)).join('、'):'填写完整配置后，即可测试凭证并开启连接。')}</p>`:''}${connected?'<p class="dingtalk-inline-notice is-subtle">Stream 连接已建立。请用私聊或已启用的群内 @ 验证实际收发，连接状态不代表图文已完成。</p>':''}${state.dingtalkActionError||state.dingtalkError?`<div class="dingtalk-feedback is-error" role="alert">${icon('alert')}<span>${h(state.dingtalkActionError||state.dingtalkError)}</span></div>`:''}${state.dingtalkTest?`<div class="dingtalk-feedback ${state.dingtalkTest.ok?'is-success':'is-error'}" role="status">${icon(state.dingtalkTest.ok?'check':'alert')}<span>${h(state.dingtalkTest.message)}${state.dingtalkTest.ok?' 凭证可用；开启连接后，请在私聊或已启用的群内 @ 验证收发。':''}</span></div>`:''}<ol class="dingtalk-flow" aria-label="钉钉创作流程">${[['发起需求','私聊直接发，群聊需 @'],['集中追问','一次补齐创作信息'],['生成图文','沿用平台模型与风格'],['回到钉钉','直接收到文案和图片']].map(([title,desc],index)=>`<li><span>${String(index+1).padStart(2,'0')}</span><div><strong>${title}</strong><small>${desc}</small></div>${index<3?icon('arrow'):''}</li>`).join('')}</ol></section>`;
+}
+function dingtalkConversationLabel(item={}) {
+  const group=String(item.conversationType)==='2',title=typeof item.conversationTitle==='string'?item.conversationTitle.trim().slice(0,160):'';
+  return `<span class="dingtalk-channel-tag ${group?'is-group':''}">${group?'群聊':'私聊'}</span>${group?`<span class="dingtalk-channel-title">${h(title||'群内创作')}</span>`:''}`;
+}
+function dingtalkRecentView() {
+  const sessions=state.dingtalk.sessions||[],deliveries=state.dingtalk.deliveries||[],activity=state.dingtalk.activity||[],busy=dingtalkWorking();
+  return `<section class="panel dingtalk-sessions-panel"><div class="dingtalk-section-heading"><div><span class="eyebrow">EVERY CONVERSATION, IN VIEW</span><h2>最近创作</h2></div><span class="dingtalk-record-count">${sessions.length} 个会话</span></div>${sessions.length?`<div class="dingtalk-sessions-list">${sessions.slice(0,12).map(session=>{
+    const projectId=dingtalkProjectId(session.projectId),group=String(session.conversationType)==='2';
+    return `<article class="dingtalk-session"><div><span class="dingtalk-record-status status-${h(session.stage)}">${session.stage==='generating'?'<span class="spinner spinner-small"></span>':''}${h(DINGTALK_STAGES[session.stage]||'状态待确认')}</span><time>${h(dingtalkDate(session.updatedAt))}</time></div><div class="dingtalk-channel-line">${dingtalkConversationLabel(session)}</div><h3>成员 ${h(session.userId||'未识别')}</h3><p>${session.referenceCount?`${h(session.referenceCount)} 张参考图片 · `:''}${projectId?'作品已留存在平台，可继续对话修改。':group?'在原群 @ 机器人，继续这位成员的创作。':'需求与补充信息在钉钉私聊中继续。'}</p>${session.lastError?`<p class="dingtalk-record-error">${h(session.lastError)}</p>`:''}${projectId?`<button type="button" class="text-button" data-action="continue-chat" data-id="${h(projectId)}">在平台继续这份作品 ${icon('arrow')}</button>`:''}</article>`;
+  }).join('')}</div>`:'<div class="dingtalk-empty">'+icon('cards')+'<h3>第一份图文，从钉钉发起</h3><p>连接后私聊机器人，或在已启用的群内 @ 发需求。会话与作品会留在这里。</p></div>'}</section><section class="panel dingtalk-deliveries-panel"><div class="dingtalk-section-heading"><div><span class="eyebrow">DELIVERED TO YOUR CONVERSATION</span><h2>结果回传</h2></div><span class="dingtalk-record-count">${deliveries.length} 条记录</span></div>${deliveries.length?`<div class="dingtalk-deliveries-list">${deliveries.slice(0,10).map(delivery=>`<article class="dingtalk-delivery"><div><span class="dingtalk-record-status status-${h(delivery.status)}">${['pending','sending'].includes(delivery.status)?'<span class="spinner spinner-small"></span>':''}${h(DINGTALK_DELIVERIES[delivery.status]||'状态待确认')}</span><time>${h(dingtalkDate(delivery.updatedAt||delivery.createdAt))}</time></div><div class="dingtalk-channel-line">${dingtalkConversationLabel(delivery)}${delivery.userId?`<small>成员 ${h(delivery.userId)}</small>`:''}</div><p>${h(delivery.message||'图文结果将回到发起需求的钉钉会话。')}</p>${delivery.status==='unknown'?'<small>请先到钉钉核对是否收到，避免重复发送。</small>':''}${delivery.status==='failed'&&delivery.canRetry===true?`<button type="button" class="text-button" data-action="dingtalk-retry-delivery" data-id="${h(delivery.id)}" ${busy?'disabled':''}>${icon('refresh')}重发失败的结果</button><small>只重发已有结果，不会重新生图。</small>`:''}</article>`).join('')}</div>`:'<div class="dingtalk-empty">'+icon('image')+'<h3>文案和图片，直接收到</h3><p>生成完成后自动回到原私聊或群聊。这里显示实际回传状态，失败结果可单独重发。</p></div>'}</section><details class="panel dingtalk-activity-panel"><summary><span>${icon('history')}接入活动</span><small>最近 ${Math.min(activity.length,20)} 条</small></summary>${activity.length?`<ol>${activity.slice(0,20).map(item=>`<li><span class="dingtalk-activity-dot ${['error','failed'].includes(item.status)?'is-error':''}"></span><p>${h(item.message||'状态已更新')}</p><time>${h(dingtalkDate(item.at))}</time></li>`).join('')}</ol>`:'<p class="dingtalk-activity-empty">保存配置、连接和消息处理活动会显示在这里，不展示密钥与聊天正文。</p>'}</details>`;
+}
+function acceptDingtalk(payload) {
+  const snapshot=payload?.snapshot||payload;
+  if(!snapshot?.config||!snapshot?.status||!Array.isArray(snapshot.sessions)||!Array.isArray(snapshot.activity))throw new Error('钉钉接入数据不完整，请重新读取。');
+  state.dingtalk={...snapshot,deliveries:Array.isArray(snapshot.deliveries)?snapshot.deliveries:[]};
+  if(!state.dingtalkDraft||!state.dingtalkDirty)state.dingtalkDraft=dingtalkDraftFromConfig(snapshot.config);
+  return snapshot;
+}
+function captureDingtalkDraft() {
+  const form=document.querySelector('#dingtalk-config-form');if(!form||state.dingtalkBusy==='save')return;
+  const fields=new FormData(form);
+  state.dingtalkDraft={clientId:String(fields.get('clientId')||''),clientSecret:String(fields.get('clientSecret')||''),robotCode:String(fields.get('robotCode')||''),corpId:String(fields.get('corpId')||''),allowedUserIds:String(fields.get('allowedUserIds')||''),matchTrends:fields.has('matchTrends'),groupEnabled:fields.has('groupEnabled'),clearSecret:fields.has('clearSecret')};
+  state.dingtalkDirty=true;state.dingtalkTest=null;updateDingtalk(false);
+}
+function updateDingtalk(includeRecent=true) {
+  if(state.view!=='dingtalk'||!state.dingtalk)return;
+  const status=document.querySelector('#dingtalk-status-region');if(!status){render();return;}status.innerHTML=dingtalkStatusView();
+  if(includeRecent){const recent=document.querySelector('#dingtalk-recent-region');if(recent){const activityOpen=recent.querySelector('.dingtalk-activity-panel')?.open;recent.innerHTML=dingtalkRecentView();if(activityOpen)recent.querySelector('.dingtalk-activity-panel').open=true;}}
+  const connection=document.querySelector('#dingtalk-header-connection');if(connection){connection.classList.toggle('connected',dingtalkConnected());connection.innerHTML='<i></i>'+(dingtalkConnected()?'Stream 已连接':'等待连接钉钉');}
+  const scope=document.querySelector('#dingtalk-scope-label');if(scope)scope.textContent=state.dingtalk.config.groupEnabled===true?'私聊 · 群聊 @':'私聊已启用';
+  const form=document.querySelector('#dingtalk-config-form');if(form){const group=form.querySelector('#dingtalk-group-enabled');if(group&&!state.dingtalkDirty)group.checked=state.dingtalk.config.groupEnabled===true;form.querySelector('fieldset').disabled=state.dingtalkBusy==='save';const save=form.querySelector('#dingtalk-save');save.disabled=Boolean(state.dingtalkBusy);save.innerHTML=state.dingtalkBusy==='save'?'<span class="spinner spinner-small"></span>正在保存…':icon('check')+'保存配置';const draft=form.querySelector('#dingtalk-draft-state');draft.textContent=state.dingtalkDirty?'有未保存的修改':'使用本地已保存配置';draft.classList.toggle('is-dirty',state.dingtalkDirty);const secret=form.querySelector('#dingtalk-secret-status');secret.textContent=state.dingtalk.config.hasSecret?'凭证已保存':'尚未保存凭证';form.querySelector('#dingtalk-clear-secret-label').hidden=!state.dingtalk.config.hasSecret;}
+}
+function scheduleDingtalkPoll() {
+  clearTimeout(dingtalkPollTimer);
+  if(state.view==='dingtalk'&&state.dingtalk&&(state.dingtalkError||['connected','connecting','reconnecting'].includes(state.dingtalk.status.state)||state.dingtalk.status.busy||(state.dingtalk.sessions||[]).some(session=>session.stage==='generating')||(state.dingtalk.deliveries||[]).some(delivery=>['pending','sending'].includes(delivery.status))))dingtalkPollTimer=setTimeout(()=>loadDingtalk({quiet:true}),3000);
+}
+async function loadDingtalk({quiet=false}={}) {
+  if(state.dingtalkBusy)return;
+  const version=++dingtalkLoadVersion;state.dingtalkLoading=true;if(!quiet&&!state.dingtalk&&state.view==='dingtalk')render();
+  try{const payload=await api('/api/dingtalk');if(version!==dingtalkLoadVersion)return;const first=!state.dingtalk;acceptDingtalk(payload);state.dingtalkError='';if(state.view==='dingtalk'){if(first){render();updateDingtalk();}else updateDingtalk();}}
+  catch(error){if(version===dingtalkLoadVersion){state.dingtalkError=error.message;if(state.view==='dingtalk'){if(state.dingtalk)updateDingtalk();else render();}}}
+  finally{if(version===dingtalkLoadVersion){state.dingtalkLoading=false;scheduleDingtalkPoll();}}
+}
+async function saveDingtalkConfig() {
+  if(dingtalkWorking())return notify('请等待当前钉钉操作完成后再保存。');
+  const form=document.querySelector('#dingtalk-config-form');if(!form?.reportValidity())return;
+  captureDingtalkDraft();const draft=state.dingtalkDraft,allowedUserIds=[...new Set(draft.allowedUserIds.split(/[\n,，]/).map(value=>value.trim()).filter(Boolean))];
+  if(!allowedUserIds.length)return notify('至少填写一个允许使用的成员 UserID。',true);
+  if(!draft.clearSecret&&!draft.clientSecret.trim()&&!state.dingtalk.config.hasSecret)return notify('首次接入需要填写应用的 Client Secret。',true);
+  if(draft.clearSecret&&draft.clientSecret.trim())return notify('清除凭证与设置新凭证不能同时进行，请选择一种操作。',true);
+  ++dingtalkLoadVersion;clearTimeout(dingtalkPollTimer);state.dingtalkBusy='save';state.dingtalkError='';state.dingtalkActionError='';updateDingtalk();
+  try{const payload=await api('/api/dingtalk/config',{method:'PUT',body:{clientId:draft.clientId.trim(),clientSecret:draft.clientSecret.trim(),robotCode:draft.robotCode.trim(),corpId:draft.corpId.trim(),allowedUserIds,matchTrends:draft.matchTrends,groupEnabled:draft.groupEnabled,clearSecret:draft.clearSecret}});acceptDingtalk(payload);state.dingtalkDirty=false;state.dingtalkDraft=dingtalkDraftFromConfig(state.dingtalk.config);state.dingtalkTest=null;if(state.view==='dingtalk')render();notify('钉钉配置已保存。测试凭证后，可手动开启连接。');}
+  catch(error){state.dingtalkActionError=error.message;notify(error.message,true);}
+  finally{state.dingtalkBusy='';updateDingtalk();scheduleDingtalkPoll();}
+}
+async function runDingtalkAction(kind) {
+  if(!['test','connect','disconnect'].includes(kind)||state.dingtalkBusy)return;
+  if(kind!=='disconnect'&&(state.dingtalkDirty||!state.dingtalk?.readiness?.configured))return notify('请先保存完整的钉钉配置，再进行此操作。',true);
+  ++dingtalkLoadVersion;clearTimeout(dingtalkPollTimer);state.dingtalkBusy=kind;state.dingtalkError='';state.dingtalkActionError='';state.dingtalkTest=null;updateDingtalk();
+  try{const payload=await api(`/api/dingtalk/${kind}`,{method:'POST',body:{}});if(payload?.snapshot||payload?.config)acceptDingtalk(payload);if(kind==='test'){state.dingtalkTest={ok:payload.ok===true,message:payload.message||(payload.ok===true?'应用凭证测试通过。':'没有收到有效的凭证测试结果，请重试。')};if(payload.ok!==true)notify(state.dingtalkTest.message,true);}else notify(kind==='connect'?(dingtalkConnected()?'Stream 已连接，请通过私聊或已启用的群内 @ 验证收发。':'连接请求已提交，正在确认实际连接状态。'):'断开请求已提交，正在确认实际连接状态。');}
+  catch(error){state.dingtalkActionError=error.message;if(kind==='test')state.dingtalkTest={ok:false,message:error.message};notify(error.message,true);}
+  finally{state.dingtalkBusy='';updateDingtalk();await loadDingtalk({quiet:true});}
+}
+async function retryDingtalkDelivery(id) {
+  const delivery=state.dingtalk?.deliveries?.find(item=>item.id===id);if(dingtalkWorking()||delivery?.status!=='failed'||delivery.canRetry!==true)return;
+  ++dingtalkLoadVersion;clearTimeout(dingtalkPollTimer);state.dingtalkBusy='retry';state.dingtalkError='';state.dingtalkActionError='';updateDingtalk();
+  try{const payload=await api(`/api/dingtalk/deliveries/${encodeURIComponent(id)}/retry`,{method:'POST',body:{}});if(payload?.snapshot||payload?.config)acceptDingtalk(payload);notify(payload.message||'已请求重发失败的结果，不会重新生图。');}
+  catch(error){state.dingtalkActionError=error.message;notify(error.message,true);}
+  finally{state.dingtalkBusy='';updateDingtalk();await loadDingtalk({quiet:true});}
 }
 const XHS_DRAFT_LABELS = {queued:'等待处理',running:'正在准备电脑草稿',filled:'已填入发布页，待核验',verified:'电脑草稿已核验',unknown:'保存结果待核验',failed:'草稿准备未完成',interrupted:'上次操作已中断'};
 const XHS_CONNECTION_LABELS = {disconnected:'尚未连接',connecting:'正在打开登录',connected:'账号已连接',login_required:'等待本人登录',needs_attention:'需要本人处理',browser_unavailable:'浏览器暂不可用'};
@@ -1227,6 +1322,7 @@ function providerSettings(kind,title,description,c = {}) {
 app.addEventListener('input', event => {
   const el=event.target;
   if(el.dataset.radarSkipField&&state.radarSkipDrafts[el.dataset.opportunityId])state.radarSkipDrafts[el.dataset.opportunityId][el.dataset.radarSkipField]=el.value;
+  if(el.closest('#dingtalk-config-form'))captureDingtalkDraft();
   if(el.id==='guide-input') {state.guide.input=el.value;saveGuidance();}
   if(el.id==='guide-style-search'){state.guideStyleSearch=el.value;updateGuideStyleResults();}
   if(el.id==='trends-search'){state.trendSearch=el.value;state.trendLimit=24;updateTrendsResults();}
@@ -1268,6 +1364,7 @@ app.addEventListener('drop', event => {
 });
 app.addEventListener('change', async event => {
   const el=event.target;
+  if(el.closest('#dingtalk-config-form')){captureDingtalkDraft();return;}
   if(el.id==='guide-xhs-auto-delivery'){
     if(state.guide.creation)return;
     state.guide.xhsAutoDelivery=el.checked;saveGuidance();renderGuidance({preserve:true});return;
@@ -1295,6 +1392,7 @@ app.addEventListener('change', async event => {
 app.addEventListener('submit', async event => {
   event.preventDefault();
   if(event.target.matches('.radar-skip-form'))await decideRadar(event.target.dataset.radarSkipId,'skip');
+  if(event.target.id==='dingtalk-config-form')await saveDingtalkConfig();
   if(event.target.id==='xhs-draft-form')await submitXhsDraft();
   if(event.target.id==='radar-profile-form')await saveRadarProfile(event.target);
   if(event.target.id==='radar-settings-form')await saveRadarSettings(event.target);
@@ -1310,6 +1408,9 @@ app.addEventListener('click', async event => {
   const {action,id,view,kind}=button.dataset;
   try {
     if((state.guideUploadBusy||state.radarUploadBusy)&&['navigate','guide-new','guide-reset','new','continue-chat','open-project','trends-use','delete','radar-open','xhs-for-project'].includes(action))return notify('图片正在保存，完成后再切换。');
+    if(action==='dingtalk-reload')await loadDingtalk({quiet:Boolean(state.dingtalk)});
+    if(action==='dingtalk-action')await runDingtalkAction(kind);
+    if(action==='dingtalk-retry-delivery')await retryDingtalkDelivery(id);
     if(action==='xhs-reload')await loadXhs({quiet:Boolean(state.xhs),refreshProjects:true});
     if(action==='xhs-action'||action==='guide-xhs-action')await runXhsAction(button.dataset.kind);
     if(action==='guide-xhs-continue')await continueGuideXhsDelivery();
@@ -1348,7 +1449,7 @@ app.addEventListener('click', async event => {
     if(action==='continue-chat')await resumeProjectInGuide(id);
     if(action==='guide-retry') await sendGuidance({retry:true});
     if(action==='guide-reset')resetGuideConversation();
-    if(action==='navigate') {if(!['briefing','radar','trends','xhs','history','settings'].includes(view))return;state.view=view;const url=new URL(location.href);if(view==='briefing')url.searchParams.delete('view');else url.searchParams.set('view',view);window.history.replaceState({},'',url);render();if(view==='history')await refreshHistory();if(view==='trends')await loadTrends();if(view==='radar')await loadRadar();if(view==='xhs')await loadXhs({refreshProjects:true});if(view==='briefing')await loadXhs({quiet:true});}
+    if(action==='navigate') {if(!['briefing','radar','trends','xhs','dingtalk','history','settings'].includes(view))return;state.view=view;const url=new URL(location.href);if(view==='briefing')url.searchParams.delete('view');else url.searchParams.set('view',view);window.history.replaceState({},'',url);render();if(view==='history')await refreshHistory();if(view==='trends')await loadTrends();if(view==='radar')await loadRadar();if(view==='dingtalk')await loadDingtalk({quiet:Boolean(state.dingtalk)});if(view==='xhs')await loadXhs({refreshProjects:true});if(view==='briefing')await loadXhs({quiet:true});}
     if(action==='radar-reload')await loadRadar({quiet:Boolean(state.radar)});
     if(action==='radar-scan')await scanRadar();
     if(action==='radar-filter')filterRadar(button.dataset.filter);
@@ -1457,6 +1558,7 @@ async function boot() {
   }
   if(state.view==='trends')await loadTrends();
   if(state.view==='radar')await loadRadar();
+  if(state.view==='dingtalk')await loadDingtalk();
   if(state.view==='xhs')await loadXhs({refreshProjects:true});
   else if(state.view==='briefing')await loadXhs({quiet:true});
 }

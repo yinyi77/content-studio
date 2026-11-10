@@ -1309,3 +1309,182 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
   .guide-delivery-actions { align-items: flex-start; }
   .guide-delivery-actions > span { max-width: none; text-align: left; }
 }
+
+/* DingTalk is an additional entrance to the existing creative workflow. */
+.dingtalk-page { min-width: 0; }
+.dingtalk-loading { text-align: center; padding: 70px 24px; }
+.dingtalk-loading .spinner { display: inline-block; margin-bottom: 15px; }
+.dingtalk-loading h2 { font-size: 21px; font-weight: 600; margin-bottom: 8px; }
+.dingtalk-loading p { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+.dingtalk-connection-card { display: flex; align-items: center; flex-wrap: wrap; gap: 18px 24px; padding: 27px 30px 0; }
+.dingtalk-connection-main { display: flex; align-items: flex-start; gap: 15px; flex: 1 1 460px; min-width: 0; }
+.dingtalk-connection-main > div { min-width: 0; }
+.dingtalk-connection-icon { display: grid; place-items: center; flex: 0 0 47px; width: 47px; height: 47px; border-radius: 12px; color: var(--accent); background: var(--accent-tint); }
+.dingtalk-connection-icon.is-connected { background: var(--success-tint); color: var(--success); }
+.dingtalk-connection-icon > .icon { width: 23px; height: 23px; }
+.dingtalk-connection-kicker { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--muted); }
+.dingtalk-status-badge, .dingtalk-scope-tag { display: inline-block; font-size: 10px; line-height: 1.7; color: var(--muted); border: 1px solid var(--border); background: #fafbfc; border-radius: 5px; padding: 2px 7px; }
+.dingtalk-status-badge.is-connected { color: var(--success); background: var(--success-tint); border-color: #d6e8dc; }
+.dingtalk-connection-main h2 { font-size: 21px; font-weight: 600; line-height: 1.5; margin-top: 7px; }
+.dingtalk-connection-main p { font-size: 12px; color: var(--muted); line-height: 1.9; margin-top: 6px; overflow-wrap: anywhere; }
+.dingtalk-connection-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px 12px; flex: 0 1 auto; }
+.dingtalk-connection-actions .button { min-height: 40px; font-size: 12px; padding: 9px 13px; }
+.dingtalk-connection-actions .text-button { font-size: 11px; min-height: 36px; }
+.dingtalk-connection-meta { display: flex; justify-content: space-between; gap: 6px 20px; flex-wrap: wrap; flex: 1 1 100%; margin-top: -3px; font-size: 11px; color: var(--muted); }
+.dingtalk-connection-meta strong { color: var(--sub); font-weight: 500; margin-left: 9px; }
+.dingtalk-inline-notice { flex: 1 1 100%; margin: -7px 0 0; padding: 9px 12px; border-radius: 6px; background: var(--warning-tint); color: var(--warning); font-size: 11px; line-height: 1.9; overflow-wrap: anywhere; }
+.dingtalk-inline-notice.is-subtle { color: var(--muted); background: var(--soft); }
+.dingtalk-feedback { flex: 1 1 100%; display: flex; align-items: flex-start; gap: 8px; padding: 11px 13px; border-radius: 6px; font-size: 12px; line-height: 1.9; overflow-wrap: anywhere; }
+.dingtalk-feedback > .icon { margin-top: 3px; width: 16px; height: 16px; }
+.dingtalk-feedback.is-error { color: var(--danger); background: var(--danger-tint); }
+.dingtalk-feedback.is-success { color: var(--success); background: var(--success-tint); }
+.dingtalk-flow { flex: 1 1 100%; display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); list-style: none; padding: 20px 0; margin: 2px 0 0; border-top: 1px solid var(--border); }
+.dingtalk-flow li { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.dingtalk-flow li > span { display: grid; place-items: center; flex: 0 0 26px; width: 26px; height: 26px; border: 1px solid #dce5ef; border-radius: 7px; font-size: 10px; color: var(--accent); background: #f8fafd; }
+.dingtalk-flow strong { color: var(--sub); font-size: 12px; font-weight: 550; display: block; }
+.dingtalk-flow small { color: var(--muted); font-size: 10px; display: block; margin-top: 2px; }
+.dingtalk-flow li > .icon { width: 15px; height: 15px; margin: 0 17px 0 auto; color: #b4bfcd; }
+.dingtalk-layout { display: grid; grid-template-columns: minmax(0,1.35fr) minmax(310px,1fr); gap: 22px; margin-top: 24px; align-items: start; }
+.dingtalk-config-panel, .dingtalk-setup-panel { min-width: 0; padding: 25px 28px; }
+.dingtalk-section-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-width: 0; }
+.dingtalk-section-heading h2 { font-size: 20px; font-weight: 600; margin-top: 5px; line-height: 1.5; }
+.dingtalk-section-heading .eyebrow { font-size: 9px; letter-spacing: .07em; }
+.dingtalk-section-heading > .icon { color: #91a3b8; width: 22px; height: 22px; }
+.dingtalk-scope-tag { flex-shrink: 0; }
+.dingtalk-intro { font-size: 12px; line-height: 1.9; color: var(--muted); margin: 12px 0 23px; }
+.dingtalk-fields { padding: 0; margin: 0; border: 0; min-width: 0; }
+.dingtalk-fields label:not(.dingtalk-check) { display: block; color: var(--sub); font-size: 12px; font-weight: 550; margin: 18px 0 7px; }
+.dingtalk-fields :is(input:not([type=checkbox]),textarea) { width: 100%; min-width: 0; font-size: 13px; padding: 10px 12px; }
+.dingtalk-fields textarea { resize: vertical; min-height: 100px; }
+.dingtalk-fields .field-help { margin-top: 6px; font-size: 11px; }
+.dingtalk-field-pair { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 17px; }
+.dingtalk-field-pair label:not(.dingtalk-check) { margin-top: 0; }
+.dingtalk-secret-label { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 0 12px; }
+.dingtalk-secret-label > span { font-size: 10px; color: var(--muted); }
+.dingtalk-check { display: flex; align-items: flex-start; gap: 9px; color: var(--sub); font-size: 12px; line-height: 1.8; cursor: pointer; }
+.dingtalk-check > input { flex: 0 0 15px; width: 15px; height: 15px; margin-top: 3px; padding: 0; }
+.dingtalk-check > span { min-width: 0; }
+.dingtalk-check small { display: block; color: var(--muted); font-size: 10px; font-weight: 400; margin-top: 3px; }
+.dingtalk-clear-secret { font-size: 10px; color: var(--muted); margin: 9px 0 0; }
+.dingtalk-clear-secret[hidden] { display: none; }
+.dingtalk-trends-option { margin-top: 20px; padding: 15px 0 0; border-top: 1px solid var(--border); }
+.dingtalk-group-option { margin-top: 20px; padding: 15px 0 0; border-top: 1px solid var(--border); }
+.dingtalk-group-help { padding-left: 24px; line-height: 1.9; }
+.dingtalk-group-image-help { padding-top: 12px; border-top: 1px solid #dce5ef; }
+.dingtalk-save-row { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 23px; }
+.dingtalk-save-row > span { color: var(--muted); font-size: 11px; }
+.dingtalk-save-row > span.is-dirty { color: var(--warning); }
+.dingtalk-save-row .button { min-height: 40px; font-size: 12px; padding: 9px 15px; }
+.dingtalk-save-help { color: var(--muted); font-size: 10px; line-height: 1.8; margin-top: 11px; }
+.dingtalk-guide { min-width: 0; }
+.dingtalk-setup-steps { padding: 0; margin: 23px 0 0; list-style: none; }
+.dingtalk-setup-steps li { display: flex; gap: 13px; padding-bottom: 21px; }
+.dingtalk-setup-steps li:last-child { padding-bottom: 19px; }
+.dingtalk-setup-steps li > span { display: grid; place-items: center; flex: 0 0 25px; width: 25px; height: 25px; margin-top: 1px; background: var(--accent-tint); color: var(--accent); border-radius: 50%; font-size: 10px; }
+.dingtalk-setup-steps strong { color: var(--sub); font-size: 12px; font-weight: 550; }
+.dingtalk-setup-steps p { font-size: 11px; line-height: 1.9; color: var(--muted); margin-top: 4px; }
+.dingtalk-setup-steps a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.dingtalk-doc-link { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border); padding-top: 15px; font-size: 11px; color: var(--accent); text-decoration: none; }
+.dingtalk-doc-link .icon { width: 15px; height: 15px; }
+.dingtalk-chat-note { margin: 20px 0 0; padding: 23px 25px; background: #edf2f8; border: 1px solid #dce5ef; border-radius: 10px; }
+.dingtalk-note-icon { display: grid; place-items: center; width: 31px; height: 31px; background: #fff; border: 1px solid #dce5ef; border-radius: 8px; color: var(--accent); margin-bottom: 13px; }
+.dingtalk-chat-note h3 { color: var(--accent); font-size: 15px; font-weight: 550; }
+.dingtalk-chat-note p { color: var(--sub); font-size: 11px; line-height: 2; margin-top: 12px; }
+.dingtalk-chat-note .dingtalk-example { background: #ffffffa6; border: 1px solid #dce5ef; border-radius: 7px; padding: 11px 13px; color: var(--accent); font-size: 12px; }
+.dingtalk-chat-note > span { display: flex; align-items: flex-start; gap: 6px; color: var(--muted); font-size: 10px; line-height: 1.9; margin-top: 16px; }
+.dingtalk-chat-note > span .icon { width: 13px; height: 13px; margin-top: 3px; }
+.dingtalk-recent { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 22px; margin-top: 24px; align-items: start; }
+.dingtalk-sessions-panel, .dingtalk-deliveries-panel { min-width: 0; padding: 24px 28px 0; }
+.dingtalk-record-count { font-size: 11px; color: var(--muted); white-space: nowrap; }
+.dingtalk-empty { padding: 38px 15px 44px; text-align: center; }
+.dingtalk-empty > .icon { color: #9aaec5; width: 25px; height: 25px; }
+.dingtalk-empty h3 { font-size: 13px; font-weight: 500; color: var(--sub); margin-top: 12px; }
+.dingtalk-empty p { max-width: 290px; margin: 8px auto 0; font-size: 11px; color: var(--muted); line-height: 1.9; }
+.dingtalk-sessions-list, .dingtalk-deliveries-list { margin-top: 17px; }
+.dingtalk-session, .dingtalk-delivery { padding: 17px 0; border-top: 1px solid var(--border); min-width: 0; }
+.dingtalk-session > div, .dingtalk-delivery > div { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 6px 15px; }
+.dingtalk-session > .dingtalk-channel-line, .dingtalk-delivery > .dingtalk-channel-line { justify-content: flex-start; gap: 6px 8px; margin-top: 9px; font-size: 11px; color: var(--muted); }
+.dingtalk-channel-tag { display: inline-flex; flex-shrink: 0; font-size: 10px; padding: 1px 6px; border-radius: 4px; background: var(--soft); color: var(--muted); border: 1px solid var(--border); }
+.dingtalk-channel-tag.is-group { background: var(--accent-tint); color: var(--accent); border-color: #dce5ef; }
+.dingtalk-channel-title { min-width: 0; overflow-wrap: anywhere; }
+.dingtalk-channel-line small { font-size: 10px; color: var(--muted); overflow-wrap: anywhere; }
+.dingtalk-record-status { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--sub); }
+.dingtalk-record-status:is(.status-completed,.status-accepted) { color: var(--success); }
+.dingtalk-record-status:is(.status-clarifying,.status-generating,.status-sending,.status-pending) { color: var(--accent); }
+.dingtalk-record-status:is(.status-error,.status-failed) { color: var(--danger); }
+.dingtalk-record-status:is(.status-partial,.status-interrupted,.status-unknown) { color: var(--warning); }
+.dingtalk-session time, .dingtalk-delivery time { color: #8490a1; font-size: 10px; }
+.dingtalk-session h3 { font-size: 12px; font-weight: 500; color: var(--sub); margin-top: 8px; overflow-wrap: anywhere; }
+.dingtalk-session p, .dingtalk-delivery p { color: var(--muted); font-size: 11px; line-height: 1.9; margin-top: 5px; overflow-wrap: anywhere; }
+.dingtalk-session .dingtalk-record-error { color: var(--danger); }
+.dingtalk-session .text-button, .dingtalk-delivery .text-button { font-size: 11px; padding: 0; min-height: 31px; margin-top: 5px; text-align: left; }
+.dingtalk-session .text-button .icon, .dingtalk-delivery .text-button .icon { width: 14px; height: 14px; }
+.dingtalk-delivery > small { display: block; font-size: 10px; color: var(--muted); margin-top: 5px; line-height: 1.8; }
+.dingtalk-activity-panel { grid-column: 1/-1; padding: 0 27px; }
+.dingtalk-activity-panel > summary { display: flex; justify-content: space-between; gap: 16px; padding: 18px 0; cursor: pointer; list-style: none; }
+.dingtalk-activity-panel > summary::-webkit-details-marker { display: none; }
+.dingtalk-activity-panel > summary > span { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--sub); }
+.dingtalk-activity-panel > summary .icon { width: 15px; height: 15px; color: #8b9db3; }
+.dingtalk-activity-panel > summary > small { font-size: 10px; color: var(--muted); }
+.dingtalk-activity-panel ol { padding: 0 0 15px; margin: 0; list-style: none; }
+.dingtalk-activity-panel li { display: flex; align-items: baseline; gap: 10px; border-top: 1px solid var(--border); padding: 11px 0; }
+.dingtalk-activity-dot { width: 5px; height: 5px; border-radius: 50%; flex: 0 0 5px; background: #a3b6ce; align-self: flex-start; margin-top: 8px; }
+.dingtalk-activity-dot.is-error { background: var(--danger); }
+.dingtalk-activity-panel li p { font-size: 11px; line-height: 1.9; color: var(--muted); flex: 1; overflow-wrap: anywhere; }
+.dingtalk-activity-panel time { font-size: 10px; color: #8490a1; white-space: nowrap; }
+.dingtalk-activity-empty { font-size: 11px; line-height: 1.9; color: var(--muted); padding: 0 0 20px; }
+@media (min-width: 1191px) { .main-nav { gap: 20px; } }
+@media (max-width: 1000px) {
+  .dingtalk-layout { grid-template-columns: minmax(0,1.2fr) minmax(280px,1fr); gap: 18px; }
+  .dingtalk-config-panel, .dingtalk-setup-panel, .dingtalk-sessions-panel, .dingtalk-deliveries-panel { padding-left: 21px; padding-right: 21px; }
+  .dingtalk-section-heading { flex-wrap: wrap; }
+  .dingtalk-flow small { font-size: 9px; }
+  .dingtalk-flow li > .icon { margin-right: 8px; }
+}
+@media (max-width: 800px) {
+  .dingtalk-layout { grid-template-columns: 1fr; }
+  .dingtalk-guide { display: grid; grid-template-columns: minmax(0,1.2fr) minmax(0,1fr); gap: 18px; align-items: start; }
+  .dingtalk-chat-note { margin-top: 0; padding: 21px; }
+  .dingtalk-recent { gap: 18px; }
+  .dingtalk-flow li { align-items: flex-start; gap: 7px; }
+  .dingtalk-flow li > .icon { display: none; }
+  .dingtalk-connection-card { padding-left: 23px; padding-right: 23px; }
+}
+@media (max-width: 600px) {
+  .dingtalk-connection-card { padding: 20px 18px 0; gap: 16px; }
+  .dingtalk-connection-main { gap: 10px; }
+  .dingtalk-connection-icon { width: 37px; height: 37px; flex-basis: 37px; border-radius: 9px; }
+  .dingtalk-connection-icon > .icon { width: 19px; height: 19px; }
+  .dingtalk-connection-kicker { font-size: 10px; gap: 5px 8px; }
+  .dingtalk-status-badge { font-size: 9px; }
+  .dingtalk-connection-main h2 { font-size: 17px; margin-top: 8px; }
+  .dingtalk-connection-main p { font-size: 11px; }
+  .dingtalk-connection-actions { flex: 1 1 100%; justify-content: flex-start; gap: 8px 10px; }
+  .dingtalk-connection-actions .button { font-size: 11px; min-height: 38px; padding: 8px 11px; }
+  .dingtalk-connection-actions .text-button { font-size: 10px; }
+  .dingtalk-connection-meta { font-size: 10px; }
+  .dingtalk-inline-notice, .dingtalk-feedback { font-size: 10px; }
+  .dingtalk-flow { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 17px 10px; padding: 17px 0; }
+  .dingtalk-flow strong { font-size: 11px; }
+  .dingtalk-flow small { font-size: 9px; }
+  .dingtalk-layout, .dingtalk-recent { margin-top: 18px; gap: 18px; }
+  .dingtalk-config-panel, .dingtalk-setup-panel { padding: 21px 18px; }
+  .dingtalk-section-heading h2 { font-size: 18px; }
+  .dingtalk-section-heading .eyebrow { font-size: 8px; }
+  .dingtalk-intro { font-size: 11px; margin-bottom: 20px; }
+  .dingtalk-field-pair { grid-template-columns: 1fr; gap: 17px; }
+  .dingtalk-fields :is(input:not([type=checkbox]),textarea) { font-size: 16px; }
+  .dingtalk-fields label:not(.dingtalk-check) { font-size: 11px; }
+  .dingtalk-fields .field-help { font-size: 10px; }
+  .dingtalk-secret-label > span { font-size: 9px; }
+  .dingtalk-save-row { flex-wrap: wrap; gap: 10px; }
+  .dingtalk-save-row > span { font-size: 10px; }
+  .dingtalk-save-row .button { font-size: 11px; }
+  .dingtalk-guide, .dingtalk-recent { display: grid; grid-template-columns: 1fr; }
+  .dingtalk-sessions-panel, .dingtalk-deliveries-panel { padding: 21px 18px 0; }
+  .dingtalk-empty { padding: 30px 5px 34px; }
+  .dingtalk-activity-panel { padding: 0 18px; }
+  .dingtalk-activity-panel li { flex-wrap: wrap; gap: 2px 8px; }
+  .dingtalk-activity-panel li p { flex-basis: calc(100% - 15px); }
+  .dingtalk-activity-panel time { margin-left: 13px; }
+}

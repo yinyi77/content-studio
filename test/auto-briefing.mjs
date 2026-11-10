@@ -7,7 +7,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizeBriefRequest, briefingMessages, parseBriefingResponse } from '../lib/briefing.mjs';
+import { normalizeBriefRequest, briefingMessages, parseBriefingResponse, localBriefingResponse } from '../lib/briefing.mjs';
 
 // All model calls in this file go to a synthetic provider on localhost. State is
 // isolated in a temporary directory; production credentials and works are never read.
@@ -40,6 +40,86 @@ const answered = (content = answer) => initial({ clarificationAsked: true, messa
 ] });
 const parsed = (output, context = initial(), preferences = {}) => parseBriefingResponse(JSON.stringify(output), preferences, null, context);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('pure greetings produce a complete local hold without consuming the clarification round', () => {
+  for (const greeting of ['你好', '您好！', 'Hi 👋', 'HELLO', '早上好', '你好呀']) {
+    const input = normalizeBriefRequest(initial({ messages: [{ role: 'user', content: greeting }] }));
+    const response = localBriefingResponse(input);
+    assert.equal(response.decision.action, 'hold');
+    assert.deepEqual(response.decision.questions, []);
+    assert.equal(response.source, greeting);
+    assert.deepEqual(response.preferences, blank());
+    assert.match(response.reply, /主题|对象/);
+    assert.doesNotMatch(response.reply, /什么风格|什么比例|几张/);
+    assert.equal(parsed(response, input).decision.action, 'hold');
+  }
+  const input = normalizeBriefRequest(initial({ preferences: { style: 'watercolor', aspect: '1:1', count: 3, mode: 'cards' }, messages: [{ role: 'user', content: '你好' }, { role: 'assistant', content: '你好，告诉我主题即可。' }, { role: 'user', content: 'hello!' }] }));
+  const before = structuredClone(input), response = localBriefingResponse(input);
+  assert.deepEqual(response.preferences, input.preferences);
+  assert.deepEqual(response.decision.resolvedSpec, input.preferences);
+  assert.deepEqual(input, before);
+});
+
+test('greeting shortcuts never intercept substantive or previously established creative topics', () => {
+  for (const content of ['你好，给新手做一组养猫准备清单', 'hello海报设计', topic, '我想创作', '风格你定，做四张']) {
+    assert.equal(localBriefingResponse(normalizeBriefRequest(initial({ messages: [{ role: 'user', content }] }))), null);
+  }
+  assert.equal(localBriefingResponse(normalizeBriefRequest(initial({ messages: [{ role: 'user', content: topic }, { role: 'assistant', content: '请补充真实卖点。' }, { role: 'user', content: '你好' }] }))), null);
+  assert.equal(localBriefingResponse({ messages: [] }), null);
+});
+
+test('a later greeting cannot authorize generation or spend the existing topic clarification round', () => {
+  const context = initial({ messages: [{ role: 'user', content: topic }, { role: 'assistant', content: '请补充产品真实卖点。' }, { role: 'user', content: '你好' }] });
+  for (const action of ['ask', 'generate', 'hold']) {
+    const response = parsed(fixture(action, { source: topic }), context);
+    assert.equal(response.decision.action, 'hold');
+    assert.deepEqual(response.decision.questions, []);
+    assert.equal(response.source, topic);
+    assert.match(response.reply, /前面的创作内容还在/);
+  }
+});
+
+test('ask and hold can recover absent sources only from original user messages', () => {
+  const context = initial({ messages: [
+    { role: 'user', content: topic },
+    { role: 'assistant', content: 'UNCONFIRMED_ASSISTANT_PRODUCT_FACTS_AND_TREND' },
+    { role: 'user', content: answer },
+  ] });
+  for (const action of ['ask', 'hold']) for (const source of ['', '   ', null, undefined]) {
+    const response = parsed(fixture(action, { source }), context);
+    assert.equal(response.decision.action, action);
+    assert.equal(response.source, `${topic}\n\n${answer}`);
+    assert.doesNotMatch(response.source, /UNCONFIRMED|商业摄影|推荐/);
+    assert.deepEqual(response.preferences, blank());
+  }
+  const legacy = fixture('hold', { source: null }); delete legacy.decision;
+  assert.equal(parsed(legacy, context).decision.action, 'hold');
+});
+
+test('long non-generating fallback keeps the newest complete user message and full conversation intact', () => {
+  const context = normalizeBriefRequest(initial({ messages: [
+    { role: 'user', content: topic + '甲'.repeat(11900) },
+    { role: 'assistant', content: 'UNCONFIRMED_SUGGESTION' },
+    { role: 'user', content: answer + '乙'.repeat(13000) },
+  ] }));
+  const before = structuredClone(context), response = parsed(fixture('hold', { source: '' }), context);
+  assert.equal(response.source, context.messages.at(-1).content);
+  assert.ok(response.source.length <= 24000);
+  assert.deepEqual(context, before);
+});
+
+test('source recovery never weakens executable generation or invalid field validation', () => {
+  for (const source of ['', '  ', null, undefined]) {
+    assert.throws(() => parsed(fixture('generate', { source }), answered()), error => error.status === 502 && /创作要求/.test(error.message));
+  }
+  for (const action of ['ask', 'hold', 'generate']) for (const source of [123, false, [], {}, '字'.repeat(24001), ' '.repeat(24001)]) {
+    assert.throws(() => parsed(fixture(action, { source }), initial()), error => error.status === 502);
+  }
+  const held = parsed(fixture('generate', { source: '' }), answered('先别生成，只讨论一下方向。'));
+  assert.equal(held.decision.action, 'hold');
+  assert.ok(held.source.includes(topic));
+  assert.ok(held.source.includes('先别生成'));
+});
 
 test('briefing tracks whether the one clarification round has been asked', () => {
   assert.equal(normalizeBriefRequest(initial()).clarificationAsked, false);
@@ -239,6 +319,15 @@ test('HTTP batch clarification hands a complete spec to one all-images job with 
     if (index === 99) assert.fail(`Local server did not start: ${log}`);
     await sleep(30);
   }
+  await t.test('greetings work before model setup and do not contact the provider or create a work', async () => {
+    const greeting = await request('/api/brief/chat', initial({ messages: [{ role: 'user', content: '你好' }] }));
+    assert.equal(greeting.response.status, 200, greeting.raw);
+    assert.equal(greeting.value.decision.action, 'hold');
+    assert.deepEqual(greeting.value.decision.questions, []);
+    assert.equal(greeting.value.source, '你好');
+    assert.equal(briefCalls, 0); assert.equal(planCalls, 0); assert.equal(imageCalls, 0);
+    assert.deepEqual((await request('/api/projects')).value.projects, []);
+  });
   const configured = await request('/api/config', { text: { baseUrl: upstreamBase, model: 'auto-brief-text', apiKey: secret }, image: { baseUrl: upstreamBase, model: 'auto-brief-image', apiKey: secret, mode: 'images', size: 'auto' } }, 'PUT');
   assert.equal(configured.response.status, 200, configured.raw);
 
@@ -355,6 +444,23 @@ test('HTTP batch clarification hands a complete spec to one all-images job with 
       const result = await request('/api/brief/chat', { ...answered(), preferences: { ...blank(), mode: 'cover' } });
       assert.equal(result.response.status, 502, result.raw);
       assert.ok(!result.raw.includes(secret));
+    }
+    assert.equal(planCalls, beforePlan); assert.equal(imageCalls, beforeImages);
+  });
+
+  await t.test('HTTP source repair preserves user text only while ask and hold stay non-generating', async () => {
+    const beforePlan = planCalls, beforeImages = imageCalls;
+    for (const action of ['ask', 'hold']) for (const source of [null, '', undefined]) {
+      nextBrief = fixture(action, { source });
+      const response = await request('/api/brief/chat', initial());
+      assert.equal(response.response.status, 200, response.raw);
+      assert.equal(response.value.decision.action, action);
+      assert.equal(response.value.source, topic);
+    }
+    for (const source of [null, '', undefined]) {
+      nextBrief = fixture('generate', { source });
+      const response = await request('/api/brief/chat', answered());
+      assert.equal(response.response.status, 502, response.raw);
     }
     assert.equal(planCalls, beforePlan); assert.equal(imageCalls, beforeImages);
   });

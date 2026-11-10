@@ -6,7 +6,7 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { Storage, zip } from './lib/storage.mjs';
 import { styles, modes, planningMessages, renderingPrompt } from './lib/prompts.mjs';
 import { normalizeBase, textCompletion, parsePlan, listModels, generateImage } from './lib/providers.mjs';
-import { normalizeBriefRequest, briefingMessages, parseBriefingResponse } from './lib/briefing.mjs';
+import { normalizeBriefRequest, localBriefingResponse, briefingMessages, parseBriefingResponse } from './lib/briefing.mjs';
 import { TrendsService } from './lib/trends.mjs';
 import { buildTrendMatchContext } from './lib/trend-matching.mjs';
 import { normalizeCreationRequestId, normalizeProjectChatRequest, requestFingerprint, chatActionMessages, parseChatAction, draftSaveIntent } from './lib/chat-creation.mjs';
@@ -17,6 +17,7 @@ import { DecisionLinks, decisionPage } from './lib/decision-links.mjs';
 import { XhsBrowser } from './lib/xhs-browser.mjs';
 import { XhsAccountService } from './lib/xhs-account.mjs';
 import { XhsDeliveryQueue, initialXhsDelivery } from './lib/xhs-delivery.mjs';
+import { DingtalkService } from './lib/dingtalk.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 4318);
@@ -55,6 +56,19 @@ await xhs.init();
 const delivery = new XhsDeliveryQueue({ store, xhs, prepare: prepareXhsDraft, modelBusy: id => jobs.has(id),
   admit: work => serializeMutation(work, true), safe: message => redact(message) });
 await delivery.recover();
+const dingtalk = new DingtalkService({ dir: store.root,
+  analyzeBrief: input => safeDingtalkWork(() => analyzeBrief(input)),
+  createProject: input => safeDingtalkWork(() => serializeMutation(() => createChatProject({ ...input, xhsAutoDelivery: false }, { origin: 'dingtalk' }))),
+  chatProject: ({ projectId, ...input }) => safeDingtalkWork(() => serializeMutation(() => chatWithProject(projectId, input))),
+  getProject: async id => { const project = await store.get(id); return project ? delivery.view(project) : null; },
+  saveReference: input => referenceImages.create(input), getProjectImages,
+  isProjectBusy: project => running(project) || ['thinking', 'analyzing', 'generating'].includes(project.chatStatus),
+});
+await dingtalk.init();
+async function safeDingtalkWork(work) {
+  try { return await work(); }
+  catch (error) { const safe = new Error(redact(error.message)); safe.status = error.status; throw safe; }
+}
 function fail(message, status = 400) { const e = new Error(message); e.status = status; throw e; }
 function redact(value, max = 600) {
   let message = String(value || '操作失败');
@@ -218,6 +232,58 @@ async function createInChat(project, record) {
     log(project, project.error);
     await finishChatRequest(project, record, `这次创作没有全部完成：${project.error}。已有结果已保留，可直接告诉我“重试这次创作”。`, { error: project.error });
   }
+}
+async function analyzeBrief(input) {
+  input = normalizeBriefRequest(input);
+  const local = localBriefingResponse(input);
+  if (local) return local;
+  requireConfig('text');
+  if (briefRequests >= 2) fail('已有两个创作分析正在进行，请稍后再试', 429);
+  const snapshot = structuredClone(config.text);
+  const trendContext = buildTrendMatchContext(input.matchTrends ? trends.snapshot() : null, { messages: input.messages, enabled: input.matchTrends });
+  briefRequests++;
+  try {
+    const references = await referenceImages.resolve(input.referenceIds);
+    const response = await textCompletion(snapshot, withReferenceImages(briefingMessages(input, trendContext), references));
+    return parseBriefingResponse(response, input.preferences, trendContext, input);
+  } finally { briefRequests--; }
+}
+async function chatWithProject(id, rawInput) {
+  const project = await projectById(id), input = normalizeProjectChatRequest(rawInput);
+  const existing = project.chatRequests?.find(record => record.requestId === input.requestId);
+  if (existing) {
+    if (existing.fingerprint && existing.fingerprint !== input.fingerprint) fail('这个 requestId 已用于其他聊天内容，请使用新的请求编号', 409);
+    return delivery.view(project);
+  }
+  ensureIdle(project);
+  const saveIntent = draftSaveIntent(input.message);
+  if (!saveIntent?.only) requireConfig('text');
+  jobCapacity();
+  input.referenceImages = referenceMetadata(await referenceImages.resolve(input.referenceIds));
+  const record = beginChatRequest(project, input, saveIntent?.only ? 'save_draft' : null);
+  if (saveIntent) {
+    record.saveVersionRequested = true;
+    record.deliveryAccountId = project.xhsDelivery?.accountId || xhs.snapshot().account?.id || null;
+  }
+  project.chatStatus = 'thinking'; await store.save(project);
+  launch(project, item => modifyInChat(item, input, record));
+  return project;
+}
+async function getProjectImages(project) {
+  if (!Array.isArray(project.pages) || !project.pages.some(page => page.status === 'done' && page.imageUrl)) return [];
+  const directory = await realpath(path.join(store.dir(project.id), 'images'));
+  const images = [];
+  for (let index = 0; index < project.pages.length; index++) {
+    const page = project.pages[index]; if (page.status !== 'done' || !page.imageUrl) continue;
+    const match = page.imageUrl.match(/^\/media\/([0-9a-f-]{36})\/([0-9a-f-]{36}-[0-9a-f-]{36}\.(png|jpg|webp|gif))$/);
+    if (!match || match[1] !== project.id) fail('作品图片记录无效', 409);
+    const file = await realpath(path.join(directory, match[2]));
+    if (path.dirname(file) !== directory) fail('作品图片不在对应目录中', 409);
+    const bytes = await readFile(file);
+    if (!bytes.length || bytes.length > 30 * 1024 * 1024) fail('作品图片为空或超过30MB，暂不能回传钉钉', 409);
+    images.push({ bytes, name: `${String(index + 1).padStart(2, '0')}.${match[3]}`, mime: { png:'image/png',jpg:'image/jpeg',webp:'image/webp',gif:'image/gif' }[match[3]], pageId:page.id });
+  }
+  return images;
 }
 async function modifyInChat(project, input, record) {
   const previousStatus = project.status;
@@ -414,7 +480,7 @@ async function notifyRadarResult(project) {
     await notifications.sendResult(project, { resultUrl: decisionUrl(opportunity).url });
   } catch { /* Notification failures never change a saved creative result. */ }
 }
-async function createChatProject(input, { radarOpportunityId } = {}) {
+async function createChatProject(input, { radarOpportunityId, origin } = {}) {
   const requestId = normalizeCreationRequestId(input?.requestId);
   if (input.xhsAutoDelivery !== undefined && typeof input.xhsAutoDelivery !== 'boolean') fail('自动存入小红书草稿的选项必须为布尔值');
   if (input.count !== undefined && (!Number.isInteger(input.count) || input.count < 1 || input.count > 10)) fail('图片张数应为 1 到 10 的整数');
@@ -432,6 +498,7 @@ async function createChatProject(input, { radarOpportunityId } = {}) {
   }
   requireConfig('text'); requireConfig('image'); jobCapacity();
   project.creationRequestId = requestId; project.creationRequestFingerprint = fingerprint;
+  if (origin === 'dingtalk') project.origin = 'dingtalk';
   project.xhsAutoDelivery = input.xhsAutoDelivery === true;
   if (radarOpportunityId) project.radarOpportunityId = radarOpportunityId;
   else if (project.xhsAutoDelivery && !/(?:不要|先别|暂不|不需要).{0,6}(?:存|送|同步|上传).{0,6}(?:草稿|小红书)|(?:仅|只)生成[，,、\s]*(?:不要|不)上传/.test(project.source)) {
@@ -541,6 +608,26 @@ async function prepareXhsDraft(input, { allowDeliveryJob = false } = {}) {
 }
 async function api(req, res, url) {
   const method = req.method, pathname = url.pathname;
+  if (pathname === '/api/dingtalk') {
+    if (method !== 'GET') fail('钉钉接入状态仅支持读取', 405);
+    return send(res, 200, dingtalk.snapshot());
+  }
+  if (pathname === '/api/dingtalk/config') {
+    if (method !== 'PUT') fail('钉钉配置仅支持 PUT', 405);
+    return send(res, 200, await dingtalk.updateConfig(await body(req)));
+  }
+  const dingtalkAction = pathname.match(/^\/api\/dingtalk\/(connect|disconnect|test)$/);
+  if (dingtalkAction) {
+    if (method !== 'POST') fail('钉钉接入操作仅支持 POST', 405);
+    await body(req);
+    const result = await dingtalk[{ connect:'connect',disconnect:'disconnect',test:'testCredentials' }[dingtalkAction[1]]]();
+    return send(res, dingtalkAction[1] === 'test' ? 200 : 202, result);
+  }
+  const retryDingtalk = pathname.match(/^\/api\/dingtalk\/deliveries\/([0-9a-f-]{36})\/retry$/);
+  if (retryDingtalk) {
+    if (method !== 'POST') fail('重新交付结果仅支持 POST', 405);
+    await body(req); return send(res, 202, await dingtalk.retryDelivery(retryDingtalk[1]));
+  }
   if (pathname === '/api/xhs') {
     if (method !== 'GET') fail('账号工作台仅支持读取', 405);
     return send(res, 200, xhs.snapshot());
@@ -656,17 +743,7 @@ async function api(req, res, url) {
   }
   if (pathname === '/api/brief/chat') {
     if (method !== 'POST') fail('创作对话仅支持 POST 请求', 405);
-    requireConfig('text');
-    const input = normalizeBriefRequest(await body(req));
-    if (briefRequests >= 2) fail('已有两个创作分析正在进行，请稍后再试', 429);
-    const snapshot = structuredClone(config.text);
-    const trendContext = buildTrendMatchContext(input.matchTrends ? trends.snapshot() : null, { messages: input.messages, enabled: input.matchTrends });
-    briefRequests++;
-    try {
-      const references = await referenceImages.resolve(input.referenceIds);
-      const response = await textCompletion(snapshot, withReferenceImages(briefingMessages(input, trendContext), references));
-      return send(res, 200, parseBriefingResponse(response, input.preferences, trendContext, input));
-    } finally { briefRequests--; }
+    return send(res, 200, await analyzeBrief(await body(req)));
   }
   if (pathname === '/api/config' && method === 'GET') return send(res, 200, safeConfig());
   if (pathname === '/api/config' && method === 'PUT') {
@@ -710,25 +787,9 @@ async function api(req, res, url) {
   const project = await projectById(match[1]), action = match[2];
   if (action === 'chat') {
     if (method !== 'POST') fail('作品聊天仅支持 POST 请求', 405);
-    const input = normalizeProjectChatRequest(await body(req));
-    const existing = project.chatRequests?.find(record => record.requestId === input.requestId);
-    if (existing) {
-      if (existing.fingerprint && existing.fingerprint !== input.fingerprint) fail('这个 requestId 已用于其他聊天内容，请使用新的请求编号', 409);
-      return send(res, 202, { project: delivery.view(project), reply: existing.reply || '', action: existing.action });
-    }
-    ensureIdle(project);
-    const saveIntent = draftSaveIntent(input.message);
-    if (!saveIntent?.only) requireConfig('text');
-    jobCapacity();
-    input.referenceImages = referenceMetadata(await referenceImages.resolve(input.referenceIds));
-    const record = beginChatRequest(project, input, saveIntent?.only ? 'save_draft' : null);
-    if (saveIntent) {
-      record.saveVersionRequested = true;
-      record.deliveryAccountId = project.xhsDelivery?.accountId || xhs.snapshot().account?.id || null;
-    }
-    project.chatStatus = 'thinking'; await store.save(project);
-    launch(project, item => modifyInChat(item, input, record));
-    return send(res, 202, { project });
+    const input = await body(req), next = await chatWithProject(project.id, input);
+    const record = next.chatRequests?.find(item => item.requestId === normalizeCreationRequestId(input.requestId));
+    return send(res, 202, { project:next, ...(record?.status !== 'running' ? { reply:record?.reply || '',action:record?.action } : {}) });
   }
   if (!action && method === 'GET') return send(res, 200, { project: delivery.view(project) });
   if (!action && method === 'DELETE') { ensureIdle(project); await store.remove(project.id); return send(res, 200, { ok: true }); }
@@ -839,17 +900,21 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 360000;
 let xhsClosing;
 const closeXhs = () => xhsClosing ||= xhs.close().catch(() => {});
+let dingtalkClosing;
+const closeDingtalk = () => dingtalkClosing ||= dingtalk.close().catch(() => {});
 server.on('error', e => {
-  trends.close(); radar.close(); delivery.stop(); closeXhs();
+  trends.close(); radar.close(); delivery.stop(); closeXhs(); closeDingtalk();
   console.error(e.code === 'EADDRINUSE' ? `端口 ${port} 已被占用，可设置 PORT 更换端口` : `服务启动失败：${e.code}`);
   process.exitCode = 1;
 });
-server.on('close', () => { trends.close(); radar.close(); delivery.stop(); closeXhs(); });
+server.on('close', () => { trends.close(); radar.close(); delivery.stop(); closeXhs(); closeDingtalk(); });
 // Playwright installs its own SIGTERM listener after a browser is opened.
 // Explicitly stop HTTP as well, so an idle browser cannot leave the port held.
-process.once('SIGTERM', () => {
+const shutdown = () => {
   trends.close(); radar.close(); delivery.stop();
   server.close(); server.closeIdleConnections();
-  closeXhs().finally(() => process.exit(0));
-});
+  Promise.all([closeXhs(), closeDingtalk()]).finally(() => process.exit(0));
+};
+process.once('SIGTERM', shutdown);
+process.once('SIGINT', shutdown);
 server.listen(port, '127.0.0.1', () => console.log(`图文创作工作台已启动：http://127.0.0.1:${port}\n模型密钥和作品只保存在本机 data 目录。按 Ctrl+C 停止。`));
