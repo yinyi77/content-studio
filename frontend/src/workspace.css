@@ -1,0 +1,9 @@
+:root { --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+html, body, #app { width: 100%; height: 100%; margin: 0; }
+body { overflow: hidden; }
+.studio-workspace { width: 100%; height: calc(var(--vben-viewport-height, 100dvh) - var(--vben-header-height, 96px) - var(--vben-footer-height, 0px)); min-height: 280px; background: #f3f5f8; }
+.studio-frame { display: block; width: 100%; height: 100%; border: 0; background: #f3f5f8; }
+.studio-local-user { display: inline-flex; align-items: center; gap: 9px; padding-right: 12px; color: #7b8798; font-size: 12px; white-space: nowrap; }
+.studio-local-dot { width: 5px; height: 5px; border-radius: 50%; background: #63a68b; }
+.studio-avatar { display: grid; place-items: center; width: 28px; height: 28px; margin-left: 9px; border-radius: 50%; background: #eef3fb; color: #5b79a6; }
+@media(max-width:600px){.studio-local-user>span:not(.studio-avatar){display:none}.studio-local-user{padding-right:4px}.studio-avatar{margin-left:0}.studio-workspace{min-height:240px}}

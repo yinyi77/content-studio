@@ -43,6 +43,52 @@ function fixture(initial = project(), overrides = {}) {
   return { queue, store, xhs, state, calls, receipt, initial, get: () => store.get(initial.id) };
 }
 
+function multiFixture() {
+  const f = fixture(), other = { account: { id: B, nickname: 'MOCK 另一个账号' }, connection: { state: 'connected' }, status: { busy: false }, drafts: [] };
+  const states = new Map([[A, f.state], [B, other]]); let selected = B;
+  f.xhs.snapshot = () => clone(states.get(selected));
+  f.xhs.getAccountSnapshot = id => states.has(id) ? clone(states.get(id)) : null;
+  return { ...f, other, states, select: id => { selected = id; } };
+}
+
+test('a frozen A delivery stays on A while the account workspace selects B', async () => {
+  const f = multiFixture();
+  await f.queue.afterCreative(await f.get()); await f.queue.tail;
+  const p = f.queue.view(await f.get());
+  assert.equal(p.xhsDelivery.status, 'verified'); assert.equal(p.xhsDelivery.accountId, A);
+  assert.equal(f.xhs.snapshot().account.id, B, 'delivery cannot change the selected workspace');
+  assert.equal(f.calls.find(call => call.action === 'submit').payload.accountId, A);
+  assert.equal(f.other.drafts.length, 0); assert.equal(f.state.drafts.length, 1);
+});
+
+test('delivery rechecks only its bound A session even while B is selected and connected', async () => {
+  const f = multiFixture(); f.state.connection.state = 'needs_attention';
+  f.xhs.checkLogin = async options => { assert.equal(options.accountId, A); f.calls.push({ action: 'check', accountId: options.accountId }); f.state.connection.state = 'connected'; };
+  await f.queue.enqueueVersion(f.initial.id, { accountId: A }); await f.queue.tail;
+  assert.equal(f.queue.view(await f.get()).xhsDelivery.status, 'verified');
+  assert.equal(f.calls.find(call => call.action === 'check').accountId, A);
+  assert.equal(f.xhs.snapshot().account.id, B);
+});
+
+test('removing the bound account blocks its delivery instead of falling back to selected B', async () => {
+  const f = multiFixture(); f.states.delete(A);
+  await f.queue.afterCreative(await f.get()); await f.queue.tail;
+  const p = f.queue.view(await f.get());
+  assert.equal(p.xhsDelivery.status, 'blocked'); assert.equal(p.xhsDelivery.attempted, false);
+  assert.equal(p.xhsDelivery.accountId, A); assert.deepEqual(f.calls, []); assert.equal(f.other.drafts.length, 0);
+});
+
+test('a B browser task does not block A delivery and an A browser task is respected', async () => {
+  const f = multiFixture(); f.other.status.busy = true;
+  f.queue.wait = async () => { assert.fail('A must not wait for the unrelated B worker'); };
+  await f.queue.afterCreative(await f.get()); await f.queue.tail;
+  assert.equal((await f.get()).xhsDelivery.status, 'verified');
+  const g = multiFixture(); g.state.status.busy = true; let waits = 0;
+  g.queue.wait = async () => { waits++; g.state.status.busy = false; };
+  await g.queue.afterCreative(await g.get()); await g.queue.tail;
+  assert.ok(waits > 0); assert.equal((await g.get()).xhsDelivery.status, 'verified');
+});
+
 test('a saved binding is checked on explicit send after restart without a manual connection step', async () => {
   const p = project(); delete p.xhsDelivery;
   const f = fixture(p); f.state.connection.state = 'needs_attention';

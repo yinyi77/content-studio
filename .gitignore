@@ -11,6 +11,10 @@
 /backups/
 /coverage/
 /node_modules/
+**/node_modules/
+/frontend/**/.turbo/
+/frontend/**/.vite/
+/frontend/**/*.tsbuildinfo
 
 # Credentials and machine-specific files.
 *.pem

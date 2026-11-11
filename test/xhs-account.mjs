@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, stat, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { deflateSync } from 'node:zlib';
+import { XhsMediaCache } from '../lib/xhs-media.mjs';
 import { XhsAccountService } from '../lib/xhs-account.mjs';
 
 // Browser behaviour is injected. These tests do not open Chrome, visit XHS or
@@ -15,6 +17,18 @@ const connected = (id = A) => ({ state: 'connected', account: user(id), message:
 const input = extra => ({ projectId: randomUUID(), title: 'MOCK 已确认的工具', content: 'PRIVATE_DRAFT_BODY_NEVER_RETURN_THIS_TEXT', images: ['/private/tmp/PRIVATE_IMAGE_FOLDER/first.png', '/private/tmp/PRIVATE_IMAGE_FOLDER/second.png'], accountId: A, fingerprint: 'a'.repeat(64), ...extra });
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
+function mediaPng(red, green, blue) {
+  const chunk = (type, data) => {
+    const tag = Buffer.from(type), bytes = Buffer.alloc(data.length + 12); bytes.writeUInt32BE(data.length); tag.copy(bytes, 4); data.copy(bytes, 8);
+    let crc = 0xffffffff; for (const byte of Buffer.concat([tag, data])) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = crc & 1 ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1; }
+    bytes.writeUInt32BE((crc ^ 0xffffffff) >>> 0, bytes.length - 4); return bytes;
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(1); header.writeUInt32BE(1, 4); header[8] = 8; header[9] = 2;
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header), chunk('IDAT', deflateSync(Buffer.from([0, red, green, blue]))), chunk('IEND', Buffer.alloc(0))]);
+}
+const mediaAsset = (bytes, index = 0) => ({ index, mime: 'image/png', base64: bytes.toString('base64') });
+
+
 async function fixture(t, overrides = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'content-studio-xhs-account-'));
   let now = NOW; const calls = [];
@@ -23,6 +37,9 @@ async function fixture(t, overrides = {}) {
     sync: async () => ({ ...connected(), metrics: [{ id: 'views', label: '观看', value: 0, unit: '次', source: '创作中心数据概览', period: '页面当前范围' }], notes: [{ id: 'note-1', title: 'MOCK 工具笔记', url: 'https://www.xiaohongshu.com/explore/note-1', views: null, likes: 0 }], coverage: { message: '仅当前已加载笔记', hasMore: true, limit: 50 } }),
     saveDraft: async value => ({ state: 'verified', submitted: true, accountId: value.accountId, verifiedAt: new Date(now).toISOString(), message: 'MOCK 已重开核对草稿，未发布' }),
     verifyDraft: async value => ({ state: 'verified', accountId: value.accountId, verifiedAt: new Date(now).toISOString(), message: 'MOCK 已只读核验草稿' }),
+    readNote: async ({ noteId }) => ({ ...connected(), detail: { id: noteId, title: 'MOCK 官方笔记', content: 'PRIVATE_OFFICIAL_NOTE_BODY', images: ['https://ci.xhscdn.com/mock.webp?token=SECRET_TOKEN'], tags: ['效率'], source: 'official', isComplete: true } }),
+    listDrafts: async () => ({ ...connected(), officialDrafts: [], coverage: { message: 'MOCK 官方草稿列表', hasMore: false, limit: 100 } }),
+    readDraft: async ({ key }) => ({ ...connected(), detail: { id: key, title: 'MOCK 官方草稿', content: 'PRIVATE_OFFICIAL_DRAFT_BODY', images: ['https://ci.xhscdn.com/mock-draft.webp'], tags: [], source: 'official', isComplete: true } }),
     openDrafts: async () => ({ ...connected(), message: 'MOCK 电脑草稿已打开' }), close: async () => {},
   };
   const handlers = { ...defaults, ...overrides };
@@ -310,4 +327,169 @@ test('an interrupted read-only recheck is retained as unknown on restart without
   await restored.close(); await f.service.close();
   gate.resolve({ state: 'verified', accountId: A, verifiedAt: new Date(NOW).toISOString() }); await f.settle();
   assert.equal(f.service.snapshot().drafts[0].status, 'unknown');
+});
+
+
+test('analytics samples keep genuine values and source periods, replace the same day, and honor the requested note bound', async t => {
+  const f = await fixture(t); await f.connect();
+  f.handlers.sync = async () => ({ ...connected(), metrics: [{ id: 'views', value: 3, period: '近7天', source: '官方创作中心' }], notes: Array.from({ length: 230 }, (_, index) => ({ id: `note-${index}`, title: `笔记 ${index}` })), coverage: { limit: 999, hasMore: true } });
+  await f.service.startSync({ noteLimit: 200 }); let state = await f.settle();
+  assert.equal(state.notes.length, 200); assert.equal(state.sync.coverage.limit, 200); assert.deepEqual(f.calls.find(call => call.name === 'sync').args, [{ noteLimit: 200 }]);
+  assert.equal(state.analyticsHistory.length, 1); assert.equal(state.analyticsHistory[0].accountId, A); assert.equal(state.analyticsHistory[0].account.followers, 0); assert.equal(state.analyticsHistory[0].account.likes, null); assert.equal(state.analyticsHistory[0].metrics[0].period, '近7天');
+  f.setNow(NOW + 10000); await f.service.startSync(); state = await f.settle();
+  assert.equal(state.notes.length, 50); assert.equal(state.analyticsHistory.length, 1); assert.equal(state.analyticsHistory[0].at, new Date(NOW + 10000).toISOString());
+  f.setNow(NOW + 86400000); await f.service.startSync(); assert.equal((await f.settle()).analyticsHistory.length, 2);
+  for (const noteLimit of [0, 49, 201, 50.5, '100']) await assert.rejects(f.service.startSync({ noteLimit }), error => error.status === 400);
+  const cache = f.service.data.accountCaches[A]; cache.analyticsHistory = Array.from({ length: 365 }, (_, index) => ({ ...state.analyticsHistory[0], at: new Date(NOW - (365 - index) * 86400000).toISOString() }));
+  f.setNow(NOW + 2 * 86400000); await f.service.startSync(); assert.equal((await f.settle()).analyticsHistory.length, 365);
+});
+
+test('daily analytics use Beijing midnight rather than UTC midnight', async t => {
+  const f = await fixture(t); await f.connect();
+  f.setNow(Date.parse('2026-11-09T15:59:59Z')); await f.service.startSync(); await f.settle();
+  f.setNow(Date.parse('2026-11-09T16:00:01Z')); await f.service.startSync(); let state = await f.settle();
+  assert.equal(state.analyticsHistory.length, 2);
+  f.setNow(Date.parse('2026-11-10T01:00:00Z')); await f.service.startSync(); state = await f.settle();
+  assert.equal(state.analyticsHistory.length, 2);
+  assert.equal(state.analyticsHistory[1].at, '2026-11-10T01:00:00.000Z');
+});
+
+test('identity checks and content reads retain prior same-account counters when HOME omits them', async t => {
+  const f = await fixture(t); await f.connect(); await f.service.startSync(); await f.settle();
+  f.handlers.inspectAccount = async () => ({ ...connected(), account: { ...user(), followers: null, following: null, likes: null, notesCount: null } });
+  await f.service.checkLogin(); let state = await f.settle();
+  assert.equal(state.account.followers, 0); assert.equal(state.account.following, 10); assert.equal(state.account.notesCount, 2);
+  f.handlers.inspectAccount = async () => ({ ...connected(), account: { ...user(), notesCount: 0 } });
+  await f.service.checkLogin(); state = await f.settle(); assert.equal(state.account.notesCount, 0);
+  f.handlers.sync = async () => ({ ...connected(), account: { ...user(), followers: null }, metrics: [], notes: [], coverage: {} });
+  await f.service.startSync(); state = await f.settle();
+  assert.equal(state.account.followers, null, 'a new sync must show actual missing data instead of a cached counter');
+  assert.equal(state.analyticsHistory.at(-1).account.followers, null, 'a missing fresh value must not fabricate a historical sample');
+});
+
+test('note content is explicit, cached, account scoped, exclusive, and absent from common snapshots', async t => {
+  const gate = deferred(); const f = await fixture(t, { readNote: () => gate.promise }); await f.connect(); await f.service.startSync(); await f.settle();
+  const before = f.calls.length, cached = f.service.getNoteDetail('note-1', { accountId: A });
+  assert.equal(cached.detail, null); assert.equal(cached.contentStatus.state, 'not_loaded'); assert.equal(f.calls.length, before);
+  const pending = await f.service.startNoteDetail('note-1', { accountId: A }); assert.equal(pending.status.action, 'note_detail'); assert.equal(pending.notes[0].contentStatus.running, true);
+  await assert.rejects(f.service.startSync(), error => error.status === 409); await assert.rejects(f.service.startNoteDetail('note-1', { accountId: B }), error => error.status === 409);
+  gate.resolve({ ...connected(), detail: { id: 'note-1', title: '真实正文', content: 'PRIVATE_OFFICIAL_NOTE_BODY', images: ['https://ci.xhscdn.com/note.webp?token=SECRET_TOKEN&width=200'], tags: ['效率'], isComplete: true, message: 'PRIVATE_OFFICIAL_NOTE_BODY' } });
+  let state = await f.settle(), detail = f.service.getNoteDetail('note-1', { accountId: A });
+  assert.equal(detail.detail.content, 'PRIVATE_OFFICIAL_NOTE_BODY'); assert.equal(detail.detail.images[0], 'https://ci.xhscdn.com/note.webp?width=200'); assert.deepEqual(detail.detail.tags, ['效率']); assert.equal(detail.contentStatus.isComplete, true);
+  assert.doesNotMatch(JSON.stringify(state), /PRIVATE_OFFICIAL_NOTE_BODY|SECRET_TOKEN/);
+  f.handlers.sync = async () => ({ ...connected(), metrics: [], notes: [{ id: 'note-1' }], coverage: {} }); await f.service.startSync(); state = await f.settle();
+  assert.equal(state.notes[0].title, '真实正文'); assert.equal(state.notes[0].imageUrl, detail.detail.images[0]); assert.equal(state.notes[0].contentStatus.isComplete, true);
+  f.handlers.readNote = async () => { throw new Error('SECRET_TOKEN /Users/mock/profile'); };
+  f.setNow(NOW + 10000); await f.service.startNoteDetail('note-1'); state = await f.settle(); detail = f.service.getNoteDetail('note-1');
+  assert.equal(detail.detail.content, 'PRIVATE_OFFICIAL_NOTE_BODY'); assert.equal(detail.contentStatus.lastSyncAt, new Date(NOW).toISOString()); assert.equal(detail.contentStatus.state, 'error'); assert.doesNotMatch(JSON.stringify(state), /SECRET_TOKEN|mock\/profile|PRIVATE_OFFICIAL_NOTE_BODY/);
+  assert.throws(() => f.service.getNoteDetail('note-1', { accountId: B }), error => error.status === 409);
+});
+
+test('observed account changes retain each cache without mixing details, analytics, or histories', async t => {
+  const f = await fixture(t); await f.connect(); await f.service.startSync(); await f.settle(); await f.service.startNoteDetail('note-1'); await f.settle();
+  f.handlers.sync = async () => ({ ...connected(B), metrics: [{ id: 'views', value: 999 }], notes: [] });
+  await f.service.startSync(); await f.settle(); await f.service.checkLogin(); let state = await f.settle(); // A is safely restored after checking A again.
+  assert.equal(state.metrics[0].value, 0); assert.equal(f.service.getNoteDetail('note-1').detail.content, 'PRIVATE_OFFICIAL_NOTE_BODY');
+  await f.service.disconnect(); await f.settle(); f.handlers.openLogin = async () => connected(B); await f.service.startLogin(); state = await f.settle();
+  assert.deepEqual(state.notes, []); assert.deepEqual(state.analyticsHistory, []); assert.deepEqual(state.officialDrafts, []); assert.equal(f.service.getNoteDetail('note-1', { accountId: B }).detail, null); assert.ok(state.history.every(item => item.accountId === B));
+  assert.throws(() => f.service.getNoteDetail('note-1', { accountId: A }), error => error.status === 409);
+  await f.service.disconnect(); await f.settle(); f.handlers.openLogin = async () => connected(); await f.service.startLogin(); state = await f.settle();
+  assert.equal(state.notes.length, 1); assert.equal(state.analyticsHistory.length, 1); assert.equal(f.service.getNoteDetail('note-1').detail.content, 'PRIVATE_OFFICIAL_NOTE_BODY'); assert.ok(state.history.every(item => item.accountId === A));
+});
+
+test('legacy v1 data migrates without losing metrics, notes, frozen versions or account history', async t => {
+  const f = await fixture(t); await f.connect(); await f.service.startSync(); await f.settle(); await f.service.submitDraft(input()); await f.settle();
+  const file = path.join(f.dir, 'xhs-account.json'), saved = JSON.parse(await readFile(file, 'utf8')); delete saved.accountCaches; await writeFile(file, JSON.stringify(saved));
+  const restored = new XhsAccountService({ dir: f.dir, driver: f.driver, now: () => NOW }); await restored.init(); const state = restored.snapshot(), persisted = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(state.connection.state, 'needs_attention'); assert.equal(state.metrics[0].value, 0); assert.equal(state.notes[0].id, 'note-1'); assert.equal(state.drafts[0].fingerprint, 'a'.repeat(64)); assert.ok(state.history.length >= 3);
+  assert.equal(persisted.version, 1); assert.equal(persisted.accountCaches[A].notes[0].id, 'note-1'); assert.equal(persisted.drafts[0].content, 'PRIVATE_DRAFT_BODY_NEVER_RETURN_THIS_TEXT'); await restored.close();
+});
+
+test('official drafts use ephemeral opaque keys, keep successful details on failed reads, and invalidate navigation after restart', async t => {
+  const key = randomUUID(); const f = await fixture(t, { listDrafts: async () => ({ ...connected(), officialDrafts: [{ key, officialDraftId: 'official-123', title: '官方草稿', imageUrl: 'https://ci.xhscdn.com/mock.webp', kind: 'image', canRead: true }], coverage: { message: '首屏官方草稿', hasMore: true, limit: 100 } }) }); await f.connect();
+  let pending = await f.service.startOfficialDraftSync({ accountId: A }); assert.equal(pending.officialDraftSync.running, true); let state = await f.settle();
+  assert.equal(state.officialDrafts[0].key, key); assert.equal(state.officialDrafts[0].officialDraftId, 'official-123'); assert.equal(state.officialDrafts[0].canRead, true);
+  await f.service.startOfficialDraftDetail(key, { accountId: A, foreground: true }); state = await f.settle();
+  assert.deepEqual(f.calls.find(call => call.name === 'readDraft').args[0], { accountId: A, key, foreground: true }); assert.equal(f.service.getOfficialDraftDetail(key).detail.content, 'PRIVATE_OFFICIAL_DRAFT_BODY'); assert.doesNotMatch(JSON.stringify(state), /PRIVATE_OFFICIAL_DRAFT_BODY/);
+  f.handlers.readDraft = async () => ({ ...connected(), detail: { id: key, content: '仅部分正文', isComplete: false } }); await f.service.startOfficialDraftDetail(key); await f.settle();
+  assert.equal(f.service.getOfficialDraftDetail(key).detail.content, 'PRIVATE_OFFICIAL_DRAFT_BODY'); assert.equal(f.service.getOfficialDraftDetail(key).contentStatus.state, 'error');
+  f.handlers.listDrafts = async () => { throw new Error('SECRET_TOKEN'); }; await f.service.startOfficialDraftSync(); state = await f.settle();
+  assert.equal(state.officialDrafts[0].key, key); assert.equal(state.officialDraftSync.lastSyncAt, new Date(NOW).toISOString()); assert.ok(state.officialDraftSync.error);
+  const restored = new XhsAccountService({ dir: f.dir, driver: f.driver, now: () => NOW }); await restored.init(); assert.equal(restored.snapshot().officialDrafts[0].canRead, false); assert.equal(restored.getOfficialDraftDetail(key).detail.content, 'PRIVATE_OFFICIAL_DRAFT_BODY');
+  await restored.checkLogin(); await restored.inFlight; await assert.rejects(restored.startOfficialDraftDetail(key), error => error.status === 409); await restored.close();
+});
+
+test('partial official reads expose actual retrieved content without claiming completeness or erasing it on error', async t => {
+  const f = await fixture(t, { readNote: async () => ({ ...connected(), detail: { id: 'note-1', content: '部分正文', images: ['https://ci.xhscdn.com/a.webp'], isComplete: false, message: '剩余图片不可见' } }) }); await f.connect(); await f.service.startSync(); await f.settle(); await f.service.startNoteDetail('note-1'); await f.settle();
+  let detail = f.service.getNoteDetail('note-1'); assert.equal(detail.detail.content, '部分正文'); assert.equal(detail.contentStatus.state, 'partial'); assert.equal(detail.contentStatus.isComplete, false);
+  f.handlers.readNote = async () => ({ ...connected(), detail: { id: 'different-note', content: '不属于这篇笔记', isComplete: true } }); await f.service.startNoteDetail('note-1'); await f.settle(); detail = f.service.getNoteDetail('note-1');
+  assert.equal(detail.detail.content, '部分正文'); assert.equal(detail.contentStatus.state, 'error');
+});
+
+test('submission preview returns only frozen values and validated project image URLs', async t => {
+  const f = await fixture(t); await f.connect(); const projectId = randomUUID(), filename = `${randomUUID()}-${randomUUID()}.png`, escapedName = `${randomUUID()}-${randomUUID()}.png`;
+  const images = path.join(f.dir, 'projects', projectId, 'images'); await mkdir(images, { recursive: true }); const valid = path.join(images, filename); await writeFile(valid, 'MOCK');
+  const outside = path.join(f.dir, 'outside.png'); await writeFile(outside, 'MOCK'); await symlink(outside, path.join(images, escapedName));
+  const created = await f.service.submitDraft(input({ projectId, images: [valid, outside, path.join(images, escapedName)] })); await f.settle(); const preview = await f.service.getSubmissionDetail(created.draft.id, { accountId: A });
+  assert.equal(preview.content, 'PRIVATE_DRAFT_BODY_NEVER_RETURN_THIS_TEXT'); assert.deepEqual(preview.images, [`/media/${projectId}/${filename}`]); assert.deepEqual(preview.imageURLs, preview.images); assert.doesNotMatch(JSON.stringify(preview), /outside\.png|\/private|content-studio-xhs-account/);
+  await assert.rejects(f.service.getSubmissionDetail(created.draft.id, { accountId: B }), error => error.status === 409); await assert.rejects(f.service.getSubmissionDetail(randomUUID(), { accountId: A }), error => error.status === 404);
+  assert.doesNotMatch(JSON.stringify(f.service.snapshot()), /PRIVATE_DRAFT_BODY|outside\.png/);
+});
+
+
+test('cache identifiers cannot inherit JavaScript object properties', async t => {
+  const f = await fixture(t, { openLogin: async () => connected('constructor'), sync: async () => ({ ...connected('constructor'), metrics: [], notes: [{ id: '__proto__', title: '有效记录' }], coverage: {} }), readNote: async ({ noteId }) => ({ ...connected('constructor'), detail: { id: noteId, content: '原型键仍是普通缓存键', isComplete: true } }) });
+  await f.connect(); await f.service.startSync(); await f.settle(); await f.service.startNoteDetail('__proto__', { accountId: 'constructor' }); await f.settle();
+  assert.equal(f.service.getNoteDetail('__proto__', { accountId: 'constructor' }).detail.content, '原型键仍是普通缓存键'); assert.equal(f.service.snapshot().analyticsHistory[0].accountId, 'constructor');
+});
+
+
+test('official blob image slots become scoped cached PNGs while snapshots expose only a safe cover and restart retains bytes', async t => {
+  const key = randomUUID(), first = mediaPng(35, 70, 120), second = mediaPng(210, 80, 70);
+  const f = await fixture(t, {
+    listDrafts: async () => ({ ...connected(), officialDrafts: [{ key, officialDraftId: 'blob-draft', title: '官方图片草稿', canRead: true }] }),
+    readDraft: async () => ({ ...connected(), detail: { id: key, title: '官方图片草稿', content: 'PRIVATE_OFFICIAL_BLOB_DRAFT_BODY', images: ['blob:https://creator.xiaohongshu.com/first', null], imageAssets: [mediaAsset(first), mediaAsset(second, 1)], isComplete: true } }),
+  });
+  await f.connect(); await f.service.startOfficialDraftSync({ accountId: A }); await f.settle();
+  await f.service.startOfficialDraftDetail(key, { accountId: A }); const snapshot = await f.settle(), { detail, contentStatus } = f.service.getOfficialDraftDetail(key, { accountId: A });
+  assert.equal(detail.content, 'PRIVATE_OFFICIAL_BLOB_DRAFT_BODY'); assert.equal(detail.images.length, 2); assert.equal(contentStatus.state, 'ready'); assert.equal(detail.isComplete, true);
+  for (const url of detail.images) assert.match(url, new RegExp(`^/media/xhs/${A}/[a-f0-9]{64}\\.png$`));
+  assert.notEqual(detail.images[0], detail.images[1]); assert.equal(snapshot.officialDrafts[0].imageUrl, detail.images[0]);
+  assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE_OFFICIAL_BLOB_DRAFT_BODY|imageAssets|base64|blob:/); assert.ok(!JSON.stringify(snapshot).includes(f.dir));
+  assert.ok(!Object.hasOwn(detail, 'imageAssets')); assert.ok(!JSON.stringify(detail).includes(first.toString('base64')));
+  const primary = detail.images[0].split('/').at(-1), secondary = detail.images[1].split('/').at(-1);
+  assert.deepEqual(await f.service.getCachedImage(A, primary), { bytes: first, mime: 'image/png' });
+  assert.deepEqual(await f.service.getCachedImage(A, secondary), { bytes: second, mime: 'image/png' }, 'a detail-only image is authorized without being the list cover');
+  await assert.rejects(f.service.getCachedImage(B, primary), error => error.status === 409);
+  const persisted = JSON.parse(await readFile(path.join(f.dir, 'xhs-account.json'), 'utf8'));
+  assert.deepEqual(persisted.accountCaches[A].officialDraftDetails[key].images, detail.images); assert.doesNotMatch(JSON.stringify(persisted), /imageAssets|base64|blob:/);
+  await f.service.close(); const before = f.calls.length;
+  const restarted = new XhsAccountService({ dir: f.dir, driver: f.driver, now: () => NOW + 10000 });
+  try {
+    await restarted.init(); assert.equal(f.calls.length, before, 'restart must not ask the browser to reload assets'); assert.equal(restarted.snapshot().connection.state, 'needs_attention');
+    assert.deepEqual(restarted.getOfficialDraftDetail(key, { accountId: A }).detail.images, detail.images);
+    assert.deepEqual(await restarted.getCachedImage(A, primary), { bytes: first, mime: 'image/png' }); assert.deepEqual(await restarted.getCachedImage(A, secondary), { bytes: second, mime: 'image/png' });
+    await restarted.disconnect(); await restarted.inFlight; f.handlers.openLogin = async () => connected(B); await restarted.startLogin(); await restarted.inFlight;
+    assert.equal(restarted.snapshot().account.id, B); await assert.rejects(restarted.getCachedImage(A, primary), error => error.status === 409); await assert.rejects(restarted.getCachedImage(B, primary), error => error.status === 404);
+    await restarted.disconnect(); await restarted.inFlight; f.handlers.openLogin = async () => connected(); await restarted.startLogin(); await restarted.inFlight;
+    assert.deepEqual(await restarted.getCachedImage(A, secondary), { bytes: second, mime: 'image/png' }, 'returning to the original account restores its own referenced assets');
+  } finally { await restarted.close(); }
+});
+
+test('official list coverAssets are readable by reference and disk presence alone never authorizes a cached image', async t => {
+  const key = randomUUID(), cover = mediaPng(65, 130, 91), unused = mediaPng(160, 120, 35), replacement = mediaPng(23, 70, 120);
+  const f = await fixture(t, {
+    listDrafts: async () => ({ ...connected(), officialDrafts: [{ key, officialDraftId: 'cover-only-draft', title: '封面已读取', imageUrl: 'blob:https://creator.xiaohongshu.com/cover', coverAsset: mediaAsset(cover), canRead: true }] }),
+    readDraft: async () => ({ ...connected(), detail: { id: key, title: '官方新版本', content: 'PRIVATE_COVER_DRAFT_BODY', images: [null], imageAssets: [mediaAsset(replacement)], isComplete: true } }),
+  });
+  await f.connect(); await f.service.startOfficialDraftSync({ accountId: A }); let snapshot = await f.settle(); const coverUrl = snapshot.officialDrafts[0].imageUrl, coverName = coverUrl.split('/').at(-1);
+  assert.match(coverUrl, new RegExp(`^/media/xhs/${A}/[a-f0-9]{64}\\.png$`)); assert.equal(f.service.getOfficialDraftDetail(key, { accountId: A }).detail, null);
+  assert.deepEqual(await f.service.getCachedImage(A, coverName), { bytes: cover, mime: 'image/png' }, 'the official list cover is an independent authorized reference');
+  assert.doesNotMatch(JSON.stringify(snapshot), /coverAsset|imageAssets|base64|blob:|PRIVATE_COVER_DRAFT_BODY/);
+  const unreferenced = await new XhsMediaCache({ dir: f.dir }).materialize({ images: [null], imageAssets: [mediaAsset(unused)], isComplete: true }, { accountId: A });
+  const unusedName = unreferenced.images[0].split('/').at(-1); assert.deepEqual(await new XhsMediaCache({ dir: f.dir }).read(A, unusedName), { bytes: unused, mime: 'image/png' });
+  await assert.rejects(f.service.getCachedImage(A, unusedName), error => error.status === 404, 'an existing content hash is not permission to read unreferenced media');
+  await f.service.startOfficialDraftDetail(key, { accountId: A }); snapshot = await f.settle();
+  assert.notEqual(snapshot.officialDrafts[0].imageUrl, coverUrl); await assert.rejects(f.service.getCachedImage(A, coverName), error => error.status === 404, 'the old cover loses access after all references are replaced');
+  assert.deepEqual(await f.service.getCachedImage(A, snapshot.officialDrafts[0].imageUrl.split('/').at(-1)), { bytes: replacement, mime: 'image/png' });
 });

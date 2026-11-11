@@ -1,0 +1,35 @@
+{
+  "project": "vue-vben-admin",
+  "url": "https://github.com/vbenjs/vue-vben-admin",
+  "commit": "53b47f8ce99ecea11aa04c9c876a2f18c479838f",
+  "version": "5.7.0",
+  "license": "MIT",
+  "copiedPackages": [
+    "packages/@core/composables",
+    "packages/@core/base/design",
+    "packages/@core/ui-kit/form-ui",
+    "packages/@core/base/icons",
+    "packages/@core/ui-kit/layout-ui",
+    "packages/@core/ui-kit/menu-ui",
+    "packages/@core/ui-kit/popup-ui",
+    "packages/@core/preferences",
+    "packages/@core/ui-kit/shadcn-ui",
+    "packages/@core/base/shared",
+    "packages/@core/ui-kit/tabs-ui",
+    "packages/@core/base/typings",
+    "packages/constants",
+    "packages/effects/hooks",
+    "packages/icons",
+    "packages/effects/layouts",
+    "packages/locales",
+    "packages/preferences",
+    "packages/stores",
+    "packages/styles",
+    "internal/tailwind-config",
+    "packages/types",
+    "packages/utils"
+  ],
+  "adaptations": [
+    "BasicLayout exposes a content slot to keep the existing single business workspace mounted."
+  ]
+}

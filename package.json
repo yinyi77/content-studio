@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node server.mjs",
     "test": "node --test test/*.mjs",
-    "check": "node --check server.mjs && node --check public/app.js"
+    "check": "node --check server.mjs && node --check public/app.js",
+    "build:frontend": "node frontend/scripts/build.mjs"
   },
   "dependencies": {
     "dingtalk-stream": "2.1.7-beta.1",

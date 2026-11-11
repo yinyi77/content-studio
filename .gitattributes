@@ -1,0 +1,5 @@
+# Keep upstream source and generated translations intact during whitespace checks.
+frontend/dist/** linguist-generated=true -whitespace
+frontend/packages/** linguist-vendored=true
+frontend/internal/** linguist-vendored=true
+vendor/matrixmedia/** linguist-vendored=true -whitespace

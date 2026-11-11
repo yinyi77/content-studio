@@ -151,8 +151,10 @@ test('XHS HTTP freezes local work, scopes one account, never publishes and handl
   assert.equal((await request('/api/xhs/drafts', { method: 'POST', body: payload })).value.draft.id, verified.id);
   assert.equal((await calls()).filter(entry => entry.action === 'draft').length, 4);
   assert.equal((await request('/api/xhs/disconnect', { method: 'POST', body: {} })).response.status, 202);
-  await waitFor(value => !value.status.busy && value.connection.state === 'disconnected');
+  snapshot = await waitFor(value => !value.status.busy && value.connection.state === 'needs_attention');
+  assert.equal(snapshot.account.id, accountA, 'closing the worker preserves the saved account binding');
   await writeFile(controls, JSON.stringify({ accountId: accountB }));
+  assert.equal((await request('/api/xhs/accounts', { method: 'POST', body: { accountName: 'MOCK 账号B' } })).response.status, 201);
   await request('/api/xhs/login', { method: 'POST', body: {} });
   snapshot = await waitFor(value => !value.status.busy && value.account?.id === accountB);
   assert.equal(snapshot.notes.length, 0); assert.equal(snapshot.drafts.length, 0);

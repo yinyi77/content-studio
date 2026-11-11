@@ -1,0 +1,34 @@
+{
+  "name": "content-studio-vben",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "packageManager": "pnpm@11.25.0",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "vite --host 127.0.0.1 --port 4321",
+    "typecheck": "vue-tsc --noEmit",
+    "build:local": "vite build"
+  },
+  "dependencies": {
+    "@vben/layouts": "workspace:*",
+    "@vben/styles": "workspace:*",
+    "@vben/preferences": "workspace:*",
+    "@vben/stores": "workspace:*",
+    "@vben/locales": "workspace:*",
+    "@vben/icons": "workspace:*",
+    "vue": "catalog:",
+    "vue-router": "catalog:",
+    "pinia": "catalog:"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "catalog:",
+    "@tailwindcss/vite": "catalog:",
+    "vite": "catalog:",
+    "typescript": "catalog:",
+    "vue-tsc": "catalog:",
+    "@vben/tailwind-config": "workspace:*",
+    "sass-embedded": "catalog:"
+  }
+}
