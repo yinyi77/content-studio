@@ -8,7 +8,7 @@ export const IMAGE_STYLES = [
   { id: 'bold', name: '醒目海报', description: '强烈对比和大标题，适合宣传与清单', category: '信息与排版', aliases: ['大字海报', '强对比', '醒目', 'bold poster', 'bold'] },
   { id: 'blueprint', name: '工程蓝图', description: '技术图解，适合流程和结构说明', category: '信息与排版', aliases: ['蓝图', '技术图解', '工程图', 'blueprint'] },
   { id: 'minimal', name: '极简留白', description: '简约克制，适合品牌与概念表达', category: '信息与排版', aliases: ['极简', '留白', '简约', 'minimal', 'minimalist'] },
-  { id: 'photo', name: '商业摄影', description: '真实光线与材质，适合产品展示、空间和生活方式', category: '生活与摄影', aliases: ['写实摄影', '真实摄影', '产品摄影', '商业照片', 'photography', 'photorealistic'] },
+  { id: 'photo', name: '商业摄影', description: '自然光线、真实材质与克制排版，适合产品宣传和生活场景', category: '生活与摄影', aliases: ['写实摄影', '真实摄影', '产品摄影', '商业照片', 'photography', 'photorealistic', '写实', '自然写实', '实拍感', '纪实摄影'] },
   { id: 'cinematic', name: '电影质感', description: '电影光影与叙事构图，适合情绪故事和主题封面', category: '生活与摄影', aliases: ['电影感', '电影摄影', '电影光影', 'cinematic', 'film still'] },
   { id: 'watercolor', name: '清透水彩', description: '透明晕染与水彩纸感，适合旅行、自然和温柔叙事', category: '艺术与质感', aliases: ['水彩', '水彩画', '透明水彩', 'watercolor', 'watercolour'] },
   { id: 'ink', name: '东方水墨', description: '墨色浓淡与虚实留白，适合文化、节气和东方意境', category: '艺术与质感', aliases: ['水墨', '国风水墨', '中国画', 'ink wash', 'sumi-e'] },

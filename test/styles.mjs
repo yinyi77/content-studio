@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -93,6 +94,9 @@ test('every style loads real design guidance and renders the corresponding stabl
     const pages = [1, 2].map(index => ({ id: `page-${index}`, title: `真实内容 ${index}`, content: `清晰易读的图上文字 ${index}。`, prompt: `为第 ${index} 页保留独立文字区和清楚构图。` }));
     const project = { mode: 'cards', style: item.id, aspect: '3:4', count: 2, pages, source: topic };
     const first = await renderingPrompt(project, pages[0]), second = await renderingPrompt(project, pages[1]);
+    // The active Wan image endpoint accepts 5,000 characters and truncates the
+    // remainder. Ordinary prompts must fit with both copy and art direction.
+    assert.ok(Array.from(first).length <= 5000, `${item.id}: routine art direction exceeds the image input budget`);
     assert.deepEqual(visualBlock(first), presetVisual(item.id));
     assert.deepEqual(visualBlock(second), presetVisual(item.id));
     assert.ok(first.includes(reference) && second.includes(reference));
@@ -125,6 +129,7 @@ test('HTTP creation accepts a new photographic style and sends its rules to the 
     try {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const body = raw ? JSON.parse(raw) : {};
+      if (replyToQualityReview(body, res)) return;
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/images/generations') {
         imageCalls++; receivedPrompts.push(body.prompt);

@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -32,7 +33,9 @@ test('chat generation automatically delivers once to its bound desktop account w
   const upstream=createServer(async(req,res)=>{
     try {
       let raw='';for await(const chunk of req)raw+=chunk;
-      const input=raw?JSON.parse(raw):{};incoming.push({path:req.url,input});res.setHeader('Content-Type','application/json');
+      const input=raw?JSON.parse(raw):{};
+      if (replyToQualityReview(input, res)) return;
+      incoming.push({path:req.url,input});res.setHeader('Content-Type','application/json');
       if(req.url==='/v1/images/generations'){
         imageCalls++;if(imageDelay)await sleep(imageDelay);
         if(imageFailures>0){imageFailures--;res.statusCode=429;return res.end(JSON.stringify({error:{message:'MOCK image capacity exhausted'}}));}

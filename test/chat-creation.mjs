@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -46,6 +47,7 @@ test('chat-only creation and follow-up use local mocked models, persisted idempo
     try {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const body = raw ? JSON.parse(raw) : {};
+      if (replyToQualityReview(body, res)) return;
       incoming.push({ url: req.url, body });
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/images/generations') {

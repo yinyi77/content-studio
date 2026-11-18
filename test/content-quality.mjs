@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -99,7 +100,8 @@ test('page rendering shares one visual system while using only each page current
   const input = planInput({ visualSystem, planningNotes: notes, missingFacts });
   const project = { ...input, mode: 'cards', style: 'warm', aspect: '3:4', count: 2,
     pages: input.pages.map((page, index) => ({ ...page, id: `page-${index + 1}` })) };
-  project.pages[1] = { ...project.pages[1], title: '修改后的图内标题', content: '这段文字已经更新。', prompt: '旧视觉草稿写着：旧标题、旧正文。使用右侧留白构图。' };
+  project.pages[1] = { ...project.pages[1], title: '修改后的图内标题', content: '这段文字已经更新。',
+    prompt: '构图：使用右侧留白构图。\n\n图上文字（逐字，中文）：\n主标题：旧标题\n列表：旧正文' };
   for (const page of project.pages) {
     const prompt = await renderingPrompt(project, page);
     assert.deepEqual(block(prompt, 'series-visual-system'), visualSystem);
@@ -111,6 +113,8 @@ test('page rendering shares one visual system while using only each page current
   const edited = await renderingPrompt(project, project.pages[1]);
   assert.equal(block(edited, 'authoritative-text').title, '修改后的图内标题');
   assert.equal(block(edited, 'authoritative-text').body, '这段文字已经更新。');
+  assert.ok(edited.includes('使用右侧留白构图'));
+  assert.ok(!edited.includes('旧标题') && !edited.includes('旧正文'));
 });
 
 test('legacy works have deterministic shared style fallback and distinct single-page modes', async () => {
@@ -148,6 +152,7 @@ test('creation and page-only edits persist the visual system without leaking pla
     try {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const body = raw ? JSON.parse(raw) : {};
+      if (replyToQualityReview(body, res)) return;
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/images/generations') {
         imageCalls++; imagePrompts.push(body.prompt);

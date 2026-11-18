@@ -6,6 +6,7 @@ import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { Storage, zip } from './lib/storage.mjs';
 import { styles, modes, planningMessages, renderingPrompt } from './lib/prompts.mjs';
 import { normalizeBase, textCompletion, parsePlan, listModels, generateImage } from './lib/providers.mjs';
+import { contentFingerprint, readerFields, reviewAndImproveContent } from './lib/content-quality.mjs';
 import { normalizeBriefRequest, localBriefingResponse, briefingMessages, parseBriefingResponse } from './lib/briefing.mjs';
 import { TrendsService } from './lib/trends.mjs';
 import { buildTrendMatchContext } from './lib/trend-matching.mjs';
@@ -121,17 +122,53 @@ async function analyze(project, { automatic = false } = {}) {
   const references = await referenceImages.resolve(project.referenceIds || []);
   const text = await textCompletion(snapshot, withReferenceImages(await planningMessages(project), references));
   const plan = parsePlan(text, project.mode === 'cards' ? project.count : 1);
-  if (project.xhsDelivery?.enabled) validateXhsCopy(plan.title, plan.caption);
   project.title = plan.title; project.caption = plan.caption;
   project.visualSystem = plan.visualSystem || null;
   project.planningNotes = plan.planningNotes ? redact(plan.planningNotes, 2000) : '';
   project.missingFacts = plan.missingFacts.map(item => redact(item, 200));
   project.pages = plan.pages.map(page => ({ id: randomUUID(), title: page.title, content: page.content, prompt: page.prompt, status: 'pending', imageUrl: null, error: null }));
-  project.status = 'draft'; project.error = null;
+  project.status = 'analyzing'; project.error = null;
+  await ensureWritingQuality(project, { textConfig: snapshot, references });
+  project.status = 'draft';
   log(project, automatic ? '内容方案已准备好，接下来自动生成图片' : '拆页方案已准备好，可修改文字和画面描述，确认后生成图片');
   await store.save(project);
 }
+async function ensureWritingQuality(project, { candidate = project, fields, instruction = '', textConfig, references, allowRewrite = true } = {}) {
+  const fingerprint = contentFingerprint(candidate);
+  if (project.contentQuality?.status === 'passed' && project.contentQuality.applied
+    && project.contentQuality.fingerprint === fingerprint) return;
+  requireConfig('text');
+  const images = references ?? await referenceImages.resolve(candidate.referenceIds || []);
+  const result = await reviewAndImproveContent({ project: candidate, fields, instruction, allowRewrite,
+    config: textConfig || structuredClone(config.text), references: images,
+    onProgress: async report => {
+      project.contentQuality = report;
+      log(project, report.status === 'rewriting'
+        ? `文案审稿 ${report.score}/100，正在按意见优化第 ${report.rewriteCount + 1} 轮`
+        : '正在独立审阅标题、正文与本次图内文字');
+      await store.save(project);
+    },
+  });
+  project.contentQuality = { ...result.report, error: result.report.error ? redact(result.report.error) : undefined };
+  if (result.report.status !== 'passed') {
+    project.contentQuality.draft = readerFields(result.draft);
+    await store.save(project);
+    const issue = result.report.issues?.find(item => item.severity === 'blocker') || result.report.issues?.[0];
+    const message = result.report.status === 'error'
+      ? `文案审稿未完成：${project.contentQuality.error}`
+      : `文案审稿 ${result.report.score}/100，尚未通过：${issue?.reason || result.report.summary}`;
+    fail(`${message}。文字草稿已保留，可补充资料或调整表达后重试`, 422);
+  }
+  project.title = result.draft.title; project.caption = result.draft.caption;
+  project.pages = result.draft.pages;
+  project.contentQuality.applied = true;
+  if (project.xhsDelivery?.enabled) validateXhsCopy(project.title, project.caption);
+  await store.save(project);
+}
 async function render(project, pageId) {
+  const pendingFields = project.contentQuality?.status === 'pending' ? project.contentQuality.scope : undefined;
+  await ensureWritingQuality(project, { fields: pendingFields,
+    allowRewrite: Boolean(pendingFields?.length) || !project.pages.some(page => page.imageUrl) });
   const snapshot = structuredClone(config.image);
   const selected = pageId ? new Set(Array.isArray(pageId) ? pageId : [pageId]) : null;
   const pages = selected ? project.pages.filter(page => selected.has(page.id)) : project.pages.filter(page => page.status !== 'done');
@@ -318,12 +355,15 @@ async function modifyInChat(project, input, record) {
     record.action = action.action; project.chatAction = action.action;
     if (action.action === 'reply') return await finishChatRequest(project, record, action.reply);
     if (action.action === 'update_post') {
-      if (project.xhsDelivery?.enabled) validateXhsCopy(action.title ?? project.title, action.caption ?? project.caption);
       const changed = [];
       if (action.title !== undefined && action.title !== project.title) changed.push('帖子标题');
       if (action.caption !== undefined && action.caption !== project.caption) changed.push('发布文案');
-      if (action.title !== undefined) project.title = action.title;
-      if (action.caption !== undefined) project.caption = action.caption;
+      const fields = ['title', 'caption'].filter(field => action[field] !== undefined && action[field] !== project[field]);
+      if (fields.length) {
+        const candidate = structuredClone(project);
+        for (const field of fields) candidate[field] = action[field];
+        await ensureWritingQuality(project, { candidate, fields, instruction: input.message, textConfig, references });
+      }
       record.appliedChanges = changed;
       log(project, '已通过聊天更新帖子文案');
       return await finishChatRequest(project, record, (changed.length ? `已修改${changed.join('和')}。` : '帖子内容与当前版本一致，已保留现有内容。') + (saveIntent ? '接下来将当前版本另存入电脑草稿，结果会显示在本对话中。' : ''), { saveVersion: Boolean(saveIntent) });
@@ -333,7 +373,14 @@ async function modifyInChat(project, input, record) {
     if (action.action === 'append_pages') {
       const added = action.pages.map(page => ({ id: randomUUID(), title: page.title, content: page.content, prompt: page.prompt, status: 'pending', imageUrl: null, error: null }));
       if (!added.length || project.pages.length + added.length > 10) fail('一组图文最多10张，请调整追加数量');
-      project.pages.push(...added); project.count = project.pages.length; project.mode = 'cards';
+      const candidate = structuredClone(project), firstNewPage = candidate.pages.length;
+      candidate.pages.push(...added); candidate.count = candidate.pages.length; candidate.mode = 'cards';
+      if (input.referenceIds.length) for (const page of added) {
+        page.referenceIds = [...input.referenceIds]; page.referenceImages = input.referenceImages;
+      }
+      const fields = added.flatMap((page, index) => [`pages[${firstNewPage + index}].title`, `pages[${firstNewPage + index}].content`]);
+      await ensureWritingQuality(project, { candidate, fields, instruction: input.message, textConfig, references });
+      project.count = project.pages.length; project.mode = 'cards';
       action.pageIds = added.map(page => page.id);
       record.appendedCount = added.length; record.appliedChanges = [`追加${added.length}张配图`];
     } else if (action.retryPlan) {
@@ -345,10 +392,17 @@ async function modifyInChat(project, input, record) {
       await store.save(project); await analyze(project, { automatic: true });
       action.pageIds = project.pages.map(page => page.id);
     } else if (action.action === 'revise_pages') {
+      const candidate = structuredClone(project), fields = [];
       for (const patch of action.pages) {
-        const page = project.pages.find(item => item.id === patch.id);
+        const index = candidate.pages.findIndex(item => item.id === patch.id), page = candidate.pages[index];
+        for (const field of ['title', 'content']) {
+          if (patch[field] !== undefined && patch[field] !== page[field]) fields.push(`pages[${index}].${field}`);
+        }
         Object.assign(page, patch, { status: 'pending', error: null });
+        if (input.referenceIds.length) { page.referenceIds = [...input.referenceIds]; page.referenceImages = input.referenceImages; }
       }
+      if (fields.length) await ensureWritingQuality(project, { candidate, fields, instruction: input.message, textConfig, references });
+      else project.pages = candidate.pages;
       action.pageIds = action.pages.map(page => page.id);
     }
     if (input.referenceIds.length && !action.retryPlan) {
@@ -381,6 +435,9 @@ for (const project of await store.list()) {
   const activeProject = ['analyzing', 'generating'].includes(project.status);
   const activeChat = ['thinking', 'analyzing', 'generating'].includes(project.chatStatus) || project.chatRequests?.some(record => record.status === 'running');
   if (activeProject || activeChat) {
+    if (['reviewing', 'rewriting'].includes(project.contentQuality?.status)) {
+      project.contentQuality = { ...project.contentQuality, status: 'interrupted', error: '上次文案审稿已中断，可明确重试。', updatedAt: new Date().toISOString() };
+    }
     if (activeProject || project.chatAction === 'create') project.status = 'interrupted';
     if (activeProject) project.error = '上次运行已中断。请检查已有结果，再手动重试未完成的任务';
     if (activeChat) {
@@ -846,6 +903,7 @@ async function api(req, res, url) {
   if (!action && method === 'DELETE') { ensureIdle(project); await store.remove(project.id); return send(res, 200, { ok: true }); }
   if (!action && method === 'PATCH') {
     ensureIdle(project);
+    const previousCopy = readerFields(project);
     const data = await body(req);
     if (!project.pages.length) fail('拆页尚未完成，请先重试分析');
     if (data.title !== undefined) project.title = str(data.title, '作品标题', 200);
@@ -861,6 +919,12 @@ async function api(req, res, url) {
         else updated.push(page);
       }
       project.pages = updated;
+    }
+    const changedFields = Object.entries(readerFields(project)).filter(([field, text]) => text !== previousCopy[field]).map(([field]) => field);
+    if (changedFields.length) {
+      project.contentQuality = { status: 'pending', applied: false,
+        scope: changedFields,
+        updatedAt: new Date().toISOString() };
     }
     project.status = project.pages.every(x => x.status === 'done') ? 'completed' : 'draft'; project.error = null;
     await store.save(project); return send(res, 200, { project });

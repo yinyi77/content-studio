@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -114,6 +115,7 @@ test('HTTP inline photos flow through briefing, planning, image edits and scoped
         return res.end(JSON.stringify({ data: [{ b64_json: green.toString('base64') }] }));
       }
       const body = bytes.length ? JSON.parse(bytes) : {};
+      if (replyToQualityReview(body, res)) return;
       if (req.url === '/v1/images/generations') { captured.generations.push(body); return res.end(JSON.stringify({ data: [{ b64_json: green.toString('base64') }] })); }
       if (req.url !== '/v1/chat/completions') { res.statusCode = 404; return res.end('{}'); }
       const system = textOf(body.messages?.[0]), last = body.messages?.at(-1), text = textOf(last);

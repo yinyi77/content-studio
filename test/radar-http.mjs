@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -43,6 +44,7 @@ test('radar HTTP: proposal-only scan, private settings, signed decisions and exa
     try {
       let raw = ''; for await (const chunk of req) raw += chunk;
       const input = raw ? JSON.parse(raw) : {};
+      if (replyToQualityReview(input, res)) return;
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/images/generations') {
         imageCalls++;
@@ -236,6 +238,7 @@ test('radar HTTP enhancements: case photos, manual notice retries, progress, fee
         res.end(JSON.stringify({ data: [{ b64_json: png }] })); return;
       }
       const input = bytes.length ? JSON.parse(bytes) : {};
+      if (replyToQualityReview(input, res)) return;
       if (req.url === '/v1/images/generations') { imageCalls++; res.statusCode = 400; res.end(JSON.stringify({ error: { message: 'Case references must use image edits' } })); return; }
       if (req.url !== '/v1/chat/completions') { res.statusCode = 404; res.end('{}'); return; }
       textCalls++;

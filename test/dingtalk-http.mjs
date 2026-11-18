@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { replyToQualityReview } from './helpers/quality-provider.mjs';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
@@ -36,6 +37,7 @@ test('DingTalk HTTP settings and real creative pipeline remain isolated, durable
     if(req.url!=='/v1/chat/completions'){res.statusCode=404;return res.end('{}');}
     try{
       const body=JSON.parse(raw),prompt=JSON.stringify(body.messages),isPlan=prompt.includes('中文图文内容策划与视觉导演');
+      if (replyToQualityReview(body, res)) return;
       let content;
       if(isPlan){planCalls++;content={title:'MOCK 工具宣传',caption:'MOCK 介绍工具的真实使用场景。',pages:[1,2].map(i=>({title:`MOCK 页面${i}`,content:`MOCK 图片文案${i}`,prompt:`MOCK 清晰展示页面${i}`}))};}
       else if(prompt.includes('你是图文工坊的创作策划助手')){

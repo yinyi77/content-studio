@@ -3112,3 +3112,24 @@ html.legacy-embedded, .legacy-embedded body { min-height: 100%; background: #f3f
   .view-trends .admin-trends-field-footer { flex-wrap: wrap; }
   .view-trends .admin-trends-setting-section textarea#trends-keywords { font-size: 16px; }
 }
+
+
+/* Editorial review stays compact in the creation conversation. */
+.view-briefing .guide-content-quality { margin: 14px 0; border: 1px solid #e0e6ef; border-radius: 5px; background: #fafbfd; color: #536176; font-size: 12px; }
+.view-briefing .guide-content-quality > summary { display: flex; align-items: center; gap: 8px; padding: 11px 14px; cursor: pointer; list-style: none; }
+.view-briefing .guide-content-quality > summary::-webkit-details-marker { display: none; }
+.view-briefing .guide-content-quality > summary > strong { font-weight: 500; }
+.view-briefing .guide-content-quality > summary > span:last-child { margin-left: auto; color: #8793a5; }
+.view-briefing .guide-content-quality.is-passed > summary > .icon { color: #41916a; }
+.view-briefing .guide-content-quality > div { padding: 0 14px 14px; border-top: 1px solid #e9edf3; line-height: 1.8; }
+.view-briefing .guide-quality-scores { display: flex; flex-wrap: wrap; gap: 8px 18px; padding-top: 12px; }
+.view-briefing .guide-quality-scores strong { margin-left: 4px; color: #344054; font-weight: 500; }
+.view-briefing .guide-content-quality p { margin: 9px 0; }
+.view-briefing .guide-content-quality ul { margin: 10px 0; padding-left: 20px; }
+.view-briefing .guide-content-quality li { margin-bottom: 10px; }
+.view-briefing .guide-content-quality blockquote { margin: 0; padding-left: 8px; border-left: 2px solid #d3dce9; color: #69778d; }
+.view-briefing .guide-content-quality small { color: #8793a5; font-size: 11px; }
+.view-briefing .guide-quality-draft { margin: 12px 0; padding: 10px; border: 1px solid #e0e6ef; background: #fff; }
+.view-briefing .guide-quality-draft > summary { cursor: pointer; }
+.view-briefing .guide-quality-draft section { margin-top: 12px; }
+.view-briefing .guide-quality-draft p { white-space: pre-wrap; overflow-wrap: anywhere; }
