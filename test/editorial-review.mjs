@@ -96,6 +96,13 @@ test('local platform limits override a passing model review and invalid reviews 
     JSON.stringify(messages[0].content.startsWith('CONTENT_QUALITY_REWRITE') ? { edits: [{ field: 'title', text: '查找代码片段' }] } : passing()) });
   assert.equal(limited.draft.title, '查找代码片段');
   assert.equal(limited.report.rewriteCount, 1);
+  const local = { ...project, targetPlatform: 'xhs', xhsAutoDelivery: false, xhsDelivery: undefined };
+  assert.equal(contentFingerprint(project), contentFingerprint(local));
+  const generic = { ...project, targetPlatform: 'generic' };
+  const reviewed = await reviewAndImproveContent({ project: generic, fields: ['title'], config: {}, complete: async () => JSON.stringify(passing()) });
+  assert.equal(reviewed.draft.title, project.title);
+  assert.equal(reviewed.report.rewriteCount, 0);
+  assert.notEqual(contentFingerprint(generic), contentFingerprint(local));
   const invalid = await reviewAndImproveContent({ project: sample(), config: {}, complete: async () => '{"score":100,"pass":true}' });
   assert.equal(invalid.report.status, 'error');
   assert.match(invalid.report.error, /评分无效/);

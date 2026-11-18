@@ -1,3 +1,5 @@
+import { formatImageDimensions, imageSizeOptions, requestedImageSize } from './image-specs.js';
+import { projectPlatform, xhsCopyProblem } from './publishing-platform.js';
 import { IMAGE_STYLES, STYLE_CATEGORIES } from './style-catalog.js';
 
 const app = document.querySelector('#app');
@@ -91,7 +93,7 @@ const buttonBusy = name => state.busy === name ? '<span class="spinner spinner-s
 
 function blankGuidance() {
   return {messages:[],analysis:'',source:'',input:'',error:'',pending:false,clarificationAsked:false,decision:null,
-    matchTrends:true,xhsAutoDelivery:false,xhsTargetAccountId:null,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
+    matchTrends:true,targetPlatform:'generic',xhsAutoDelivery:false,xhsTargetAccountId:null,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
     preferences:{style:null,aspect:null,count:null,mode:null},
     recommendations:{style:'notion',aspect:'3:4',count:5,mode:'cards'},reasons:{}};
 }
@@ -123,6 +125,7 @@ function restoreGuidance() {
     if(data.reasons&&typeof data.reasons==='object')for(const key of ['style','aspect','count'])if(typeof data.reasons[key]==='string')base.reasons[key]=data.reasons[key].slice(0,1000);
     base.matchTrends=data.matchTrends!==false;
     base.xhsAutoDelivery=data.xhsAutoDelivery===true;
+    base.targetPlatform=projectPlatform(data);
     if(typeof data.xhsTargetAccountId==='string'&&(!data.xhsTargetAccountId||/^[A-Za-z0-9_-]{1,120}$/.test(data.xhsTargetAccountId)))base.xhsTargetAccountId=data.xhsTargetAccountId;
     base.trendMatches=normalizeGuideTrendMatches(data.trendMatches);
     if(base.matchTrends&&typeof data.selectedTrend?.id==='string'){
@@ -134,7 +137,7 @@ function restoreGuidance() {
     if(typeof data.studioSource==='string')base.studioSource=data.studioSource.slice(0,24000);
     if(data.creation&&typeof data.creation==='object'&&isGuideUuid(data.creation.requestId)){
       const c=data.creation;base.creation={requestId:c.requestId,projectId:isGuideUuid(c.projectId)?c.projectId:null,status:typeof c.status==='string'?c.status.slice(0,40):'unknown',error:typeof c.error==='string'?c.error.slice(0,1000):'',requestedAt:typeof c.requestedAt==='string'?c.requestedAt:null};
-      if(c.capture&&typeof c.capture==='object')base.creation.capture={xhsAutoDelivery:c.capture.xhsAutoDelivery===true,...(c.capture.xhsAutoDelivery===true?{xhsAccountId:typeof c.capture.xhsAccountId==='string'&&/^[A-Za-z0-9_-]{1,120}$/.test(c.capture.xhsAccountId)?c.capture.xhsAccountId:null}:{})};
+      if(c.capture&&typeof c.capture==='object')base.creation.capture={targetPlatform:projectPlatform(c.capture),xhsAutoDelivery:c.capture.xhsAutoDelivery===true,...(c.capture.xhsAutoDelivery===true?{xhsAccountId:typeof c.capture.xhsAccountId==='string'&&/^[A-Za-z0-9_-]{1,120}$/.test(c.capture.xhsAccountId)?c.capture.xhsAccountId:null}:{})};
       if(c.lastChatRequest&&isGuideUuid(c.lastChatRequest.requestId)&&typeof c.lastChatRequest.message==='string'&&c.lastChatRequest.message.length<=6000)base.creation.lastChatRequest={requestId:c.lastChatRequest.requestId,message:c.lastChatRequest.message,images:normalizeGuideImages(c.lastChatRequest.images),status:typeof c.lastChatRequest.status==='string'?c.lastChatRequest.status.slice(0,40):'unknown',restoredInput:c.lastChatRequest.restoredInput===true};
     }
     if(typeof data.creationError==='string')base.creationError=data.creationError.slice(0,1000);
@@ -193,7 +196,7 @@ function guideComposerView({creating,locked,p,hint}) {
   const g=state.guide,busy=state.guideUploadBusy||state.guideBusy;
   const sendDisabled=busy||locked||(!creating&&!guideTextReady())||(creating&&!p);
   const placeholder=creating?'输入修改要求，可添加新的产品图片':g.decision?.action==='ask'?'一次回复补充信息，可添加产品图片':'输入创作需求，可粘贴或拖入图片';
-  return `<form id="guide-form" class="guide-composer ${g.draftImages.length?'has-attachments':''}" aria-label="文字和图片消息输入框"><label class="sr-label" for="guide-input">${creating?'直接告诉我还想怎么改':'告诉创意编辑你想创作什么'}</label><input id="guide-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden ${busy||locked?'disabled':''}><button type="button" class="guide-attach-button" data-action="guide-image-add" aria-label="在消息中添加产品图片" title="可直接粘贴或拖入图片" ${busy||locked?'disabled':''}>${icon('image')}</button><div class="guide-composer-content">${guideDraftImagesView()}<textarea id="guide-input" maxlength="${creating?6000:24000}" rows="2" placeholder="${placeholder}" ${state.guideBusy?'disabled':''}>${h(g.input)}</textarea></div><div class="guide-composer-footer"><div class="guide-composer-options">${!creating?`<label class="guide-trends-toggle"><input id="guide-match-trends" type="checkbox" ${g.matchTrends?'checked':''} ${state.guideBusy?'disabled':''}><span>匹配相关热点</span></label>`:''}<span>${state.guideUploadBusy?'图片正在保存到本机，完成后可发送。':hint}</span></div><button class="button button-primary" type="submit" ${sendDisabled?'disabled':''}>${state.guideUploadBusy?'<span class="spinner spinner-small"></span>添加中':state.guideBusy?'<span class="spinner spinner-small"></span>分析中':locked?'<span class="spinner spinner-small"></span>处理中':creating?'发送修改':g.decision?.action==='ask'?'回答并创作':'发送想法'} ${icon('arrow')}</button></div></form>`;
+  return `<form id="guide-form" class="guide-composer ${g.draftImages.length?'has-attachments':''}" aria-label="文字和图片消息输入框"><label class="sr-label" for="guide-input">${creating?'直接告诉我还想怎么改':'告诉创意编辑你想创作什么'}</label><input id="guide-image-input" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden ${busy||locked?'disabled':''}><button type="button" class="guide-attach-button" data-action="guide-image-add" aria-label="在消息中添加产品图片" title="可直接粘贴或拖入图片" ${busy||locked?'disabled':''}>${icon('image')}</button><div class="guide-composer-content">${guideDraftImagesView()}<textarea id="guide-input" maxlength="${creating?6000:24000}" rows="2" placeholder="${placeholder}" ${state.guideBusy?'disabled':''}>${h(g.input)}</textarea></div><div class="guide-composer-footer"><div class="guide-composer-options">${!creating?`<label class="guide-platform">目标平台<select id="guide-target-platform" ${busy||locked?'disabled':''}><option value="generic" ${g.targetPlatform==='generic'?'selected':''}>通用图文</option><option value="xhs" ${g.targetPlatform==='xhs'?'selected':''}>小红书</option></select></label><label class="guide-trends-toggle"><input id="guide-match-trends" type="checkbox" ${g.matchTrends?'checked':''} ${state.guideBusy?'disabled':''}><span>匹配相关热点</span></label>`:''}<span>${state.guideUploadBusy?'图片正在保存到本机，完成后可发送。':hint}</span></div><button class="button button-primary" type="submit" ${sendDisabled?'disabled':''}>${state.guideUploadBusy?'<span class="spinner spinner-small"></span>添加中':state.guideBusy?'<span class="spinner spinner-small"></span>分析中':locked?'<span class="spinner spinner-small"></span>处理中':creating?'发送修改':g.decision?.action==='ask'?'回答并创作':'发送想法'} ${icon('arrow')}</button></div></form>`;
 }
 function saveGuidance() {try{sessionStorage.setItem(GUIDE_STORAGE_KEY,JSON.stringify(state.guide));}catch{}}
 const guideStyles = () => (state.config?.styles?.length?state.config.styles:GUIDE_STYLES).map(style=>{
@@ -201,10 +204,10 @@ const guideStyles = () => (state.config?.styles?.length?state.config.styles:GUID
   return {...fallback,...style,category:style.category||fallback.category||STYLE_CATEGORIES[0],aliases:Array.isArray(style.aliases)?style.aliases:fallback.aliases||[]};
 });
 const guideTextReady = () => Boolean(state.config?.text?.hasKey&&state.config.text.baseUrl&&state.config.text.model);
-const guideFieldLabel = field => ({style:'视觉风格',aspect:'画面比例',count:'图片张数'}[field]);
+const guideFieldLabel = field => ({style:'视觉风格',aspect:'构图目标比例',count:'图片张数'}[field]);
 function guideValueLabel(field,value) {
   if(field==='style')return guideStyles().find(s=>s.id===value)?.name||value;
-  if(field==='aspect')return ({'3:4':'3:4 · 竖版','1:1':'1:1 · 方形','16:9':'16:9 · 横版'}[value])||value;
+  if(field==='aspect')return ({'3:4':'目标 3:4 · 竖版','1:1':'目标 1:1 · 方形','16:9':'目标 16:9 · 横版'}[value])||value;
   return `${value} 张`;
 }
 function normalizeGuideDecision(value) {
@@ -221,7 +224,7 @@ function guidanceReady() {
   return Boolean(state.guide.source.trim()&&state.guide.analysis&&state.guide.decision?.action==='generate'&&['style','aspect','count','mode'].every(f=>state.guide.preferences[f]!==null));
 }
 function guideQuestion(field) {
-  return {style:'你想要怎样的视觉风格？',aspect:'准备用什么画面比例？',count:'这次想做几张图片？'}[field];
+  return {style:'你想要怎样的视觉风格？',aspect:'希望按什么比例构图？',count:'这次想做几张图片？'}[field];
 }
 function guideHistoryItemsView() {
   const query=state.guideHistorySearch.trim().toLocaleLowerCase();
@@ -236,6 +239,7 @@ function guideWelcomeView() {
 }
 function guidanceView() {
   const g=state.guide,p=state.guideProject,creating=Boolean(g.creation),locked=guideWorkActive();
+  const resultReady = creating && p?.id === g.creation.projectId && p.status === 'completed' && !guideGenerationActive(p);
   const thread=g.messages.length?g.messages.map(m=>`<article class="guide-message ${m.role==='user'?'user':'assistant'} ${m.kind==='clarification'?'is-clarification':''}"><span class="guide-message-label">${m.role==='user'?'你':'创意编辑'}</span>${m.kind==='clarification'?`<span class="guide-batch-label">${icon('file')}补充创作信息</span>`:''}${guideImageMessageView(m.images)}<p>${h(m.content)}</p></article>`).join(''):creating?`<article class="guide-message assistant"><span class="guide-message-label">创意编辑</span>${guideImageMessageView(g.referenceImages)}<p>已载入这份作品。查看图文，或直接告诉我想怎么改。</p></article>`:guideWelcomeView();
   const preferenceIcons={style:'image',aspect:'expand',count:'cards'};
   const preferences=(g.analysis||creating)?`<div class="guide-inline-brief" aria-label="创作参数">${['style','aspect','count'].map(f=>{
@@ -245,11 +249,15 @@ function guidanceView() {
   const trend=g.selectedTrend?`<details class="guide-context-trend"><summary><span>已选热点</span><strong>${h(g.selectedTrend.title)}</strong><span>${h(trendName(g.selectedTrend.platform))}</span></summary><p>${h(g.selectedTrend.angle)}</p>${g.selectedTrend.kind==='meme'?`<small>热梗候选 · 至 ${guideTrendDate(g.selectedTrend.expiresAt)} 有效</small>`:''}${!creating?`<button type="button" class="text-button" data-action="guide-trend-clear" ${state.guideBusy?'disabled':''}>移除热点</button>`:''}</details>`:'';
   const tools=!creating&&g.analysis&&!g.error?`<details class="guide-optional-tools" ${state.guideEdit?'open':''}><summary>查看创作方向与偏好 <span>可选，直接聊天也可以</span></summary><div class="guide-analysis"><span>内容方向</span><p>${h(g.analysis)}</p></div>${preferences}<div class="guide-optional-actions">${['style','aspect','count'].map(f=>`<button type="button" class="text-button" data-action="guide-edit" data-field="${f}" ${state.guideBusy?'disabled':''}>调整${guideFieldLabel(f)}</button>`).join('')}</div>${state.guideEdit?guideQuestionView(state.guideEdit):''}${guideTrendMatchesView()}</details>`:'';
   const hint=locked?'任务正在处理中，可以先写好下一条要求。':creating?'直接说想改哪里，或按 ⌘ / Ctrl + Enter 发送。':g.decision?.action==='ask'?'把上面的问题一起回复，拿不准的偏好可以交给我。':'信息齐全后会自动生成；暂不生成时直接告诉我。';
-  return `<div class="briefing-layout conversation-layout admin-chat-layout ${creating?'has-creation':''} ${!creating&&!g.messages.length?'is-empty':''}">
+  const context = resultReady
+    ? `<details class="guide-work-context"><summary>创作需求与参数</summary>${preferences}${trend}${g.messages.length ? thread : `<p>${h(p.source || '')}</p>${guideImageMessageView(g.referenceImages)}`}</details>`
+    : `${thread}${creating ? preferences : ''}${trend}${tools}`;
+  const result = guideCreationView(resultReady);
+  return `<div class="briefing-layout conversation-layout admin-chat-layout ${resultReady?'is-result':''} ${creating?'has-creation':''} ${!creating&&!g.messages.length?'is-empty':''}">
     ${guideHistoryView()}
     <section class="briefing-panel admin-chat-panel" aria-label="创作需求对话">
-      <div class="admin-chat-toolbar"><div class="admin-chat-current"><strong>${h(p?.title||(g.messages.length?'当前创作对话':'新建创作'))}</strong><span class="admin-chat-state ${locked||state.guideBusy?'is-working':''}">${locked||state.guideBusy?'<span class="spinner spinner-small"></span>':'<i></i>'}${h(state.guideBusy?'正在分析':locked?'正在处理':creating?guideCreationStatus(p||{}):g.decision?.action==='ask'?'等待补充':'就绪')}</span></div><div class="admin-chat-tools"><details id="guide-delivery-settings" class="admin-chat-delivery" ${state.guideDeliverySettingsOpen?'open':''}><summary>${icon('settings')}${g.xhsAutoDelivery||p?.xhsDelivery?.enabled?'交付设置 · 自动送稿':'交付设置'}</summary><div id="guide-xhs-region">${guideXhsConnectionView()}</div></details><button type="button" class="button button-secondary admin-chat-mobile-new" data-action="guide-new" ${state.guideBusy||locked?'disabled':''}>${icon('plus')}新建</button></div></div>
-      <div class="guide-thread" role="log" aria-live="polite">${thread}${state.guideBusy?'<div class="guide-thinking"><span class="spinner spinner-small"></span>正在分析需求…</div>':''}${g.error?`<div class="guide-error" role="alert"><p>${h(g.error)}</p>${!creating&&g.messages.some(m=>m.role==='user')?`<button class="text-button" data-action="guide-retry" ${state.guideBusy?'disabled':''}>重试这次分析</button>`:''}</div>`:''}${creating?preferences:''}${trend}${tools}${guideCreationView()}</div>
+      <div class="admin-chat-toolbar"><div class="admin-chat-current"><strong>${h(p?.title||(g.messages.length?'当前创作对话':'新建创作'))}</strong><span class="admin-chat-state ${locked||state.guideBusy?'is-working':''}">${locked||state.guideBusy?'<span class="spinner spinner-small"></span>':'<i></i>'}${h(state.guideBusy?'正在分析':locked?'正在处理':creating?guideCreationStatus(p||{}):g.decision?.action==='ask'?'等待补充':'就绪')}</span></div><div class="admin-chat-tools"><details id="guide-delivery-settings" class="admin-chat-delivery" ${state.guideDeliverySettingsOpen?'open':''}><summary>${icon('settings')}${guideAutomaticDelivery()?'交付设置 · 自动送稿':'交付设置'}</summary><div id="guide-xhs-region">${guideXhsConnectionView()}</div></details><button type="button" class="button button-secondary admin-chat-mobile-new" data-action="guide-new" ${state.guideBusy||locked?'disabled':''}>${icon('plus')}新建</button></div></div>
+      <div class="guide-thread" role="log" aria-live="polite">${resultReady ? result : context}${state.guideBusy?'<div class="guide-thinking"><span class="spinner spinner-small"></span>正在分析需求…</div>':''}${g.error?`<div class="guide-error" role="alert"><p>${h(g.error)}</p>${!creating&&g.messages.some(m=>m.role==='user')?`<button class="text-button" data-action="guide-retry" ${state.guideBusy?'disabled':''}>重试这次分析</button>`:''}</div>`:''}${resultReady ? context : result}</div>
       <div class="admin-chat-compose-area">${guideComposerView({creating,locked,p,hint})}<div class="guide-model-note">${creating?'直接描述修改要求，需要重画时才会重新生图。':guideTextReady()?'支持粘贴或拖入图片 · ⌘ / Ctrl + Enter 发送':'先连接文字模型即可开始。'}${!guideTextReady()?` <button class="text-button" data-action="navigate" data-view="settings">去模型设置 ${icon('arrow')}</button>`:''}</div></div>
     </section>
   </div>`;
@@ -262,9 +270,13 @@ function guideDeliveryActive(project) {
   return Boolean(delivery?.enabled&&(delivery.running||GUIDE_DELIVERY_BUSY.has(delivery.status)||(delivery.status==='waiting_generation'&&project.status==='completed')));
 }
 function guideProjectActive(project) { return guideGenerationActive(project)||guideDeliveryActive(project); }
+function guideAutomaticDelivery() {
+  const p=state.guideProject,g=state.guide;
+  return p?Boolean(p.xhsDelivery?.enabled&&p.xhsAutoDelivery!==false):Boolean(g.creation?.capture?.xhsAutoDelivery??g.xhsAutoDelivery);
+}
 function guideXhsConnectionView() {
   const g=state.guide,p=state.guideProject,delivery=p?.xhsDelivery,targetId=guideTargetAccountId(),record=xhsAccountRecord(targetId)||(!targetId?(xhsAccounts().find(record=>record.profileId===xhsProfileId())||(state.xhs?{profileId:xhsProfileId(),connectionState:state.xhs.connection?.state}:null)):null),targetBound=xhsRecordBound(record),connected=xhsRecordConnected(record),busy=Boolean(state.guideActionBusy||record?.busy||guideDeliveryActive(p));
-  const automatic=Boolean(delivery?.enabled||!p&&(g.creation?.capture?.xhsAutoDelivery??g.xhsAutoDelivery)),fixed=Boolean(delivery?.accountId||g.creation?.capture?.xhsAutoDelivery),showConnection=automatic||state.guidePublishPrompt;
+  const automatic=guideAutomaticDelivery(),fixed=Boolean(delivery?.accountId||g.creation?.capture?.xhsAutoDelivery),showConnection=automatic||Boolean(delivery?.enabled)||state.guidePublishPrompt;
   const name=delivery?.accountName||xhsRecordName(record),label=fixed?`本次草稿账号：${name}`:automatic?(targetBound?`完成后自动存至：${name}`:'已开启自动存入小红书草稿'):targetBound?`送稿账号：${name}`:'创作与修改保存在本平台';
   const message=fixed?'本次目标账号已固定。切换工作台账号不会改变送稿目标。':targetBound&&!connected?'账号已保存，送稿时会检查该账号的登录状态。':automatic?'整组图文完成后送入所选账号的电脑草稿，发布由你决定。':'准备发布时，选择一个账号再送入电脑草稿。';
   const records=xhsAccounts().filter(record=>xhsRecordBound(record)),fallback=!records.length&&targetBound?[record]:records;
@@ -297,8 +309,9 @@ function guideDeliveryLabel(project) {
   return ({waiting_generation:'图文完成后自动存草稿',preparing:'正在准备小红书草稿',queued:'正在等待送入电脑草稿',running:'正在存入并核验电脑草稿',verified:'图文和电脑草稿已完成',filled:'图文已填入，草稿待核验',unknown:'草稿保存结果待核验',failed:'图文已保留，草稿尚未送达',blocked:'图文已保留，草稿等待继续',interrupted:'草稿流程已中断，需人工核验'}[delivery.status])||'草稿状态待确认';
 }
 function guideLocalDraftView(project) {
+  const problem=xhsCopyProblem(project.title,project.caption);
   const ready=xhsEligible(project),busy=guideGenerationActive(project)||Boolean(state.guideActionBusy),targetId=guideTargetAccountId(),record=xhsAccountRecord(targetId),boundAccount=xhsRecordBound(record);
-  return `<section class="guide-xhs-delivery guide-local-draft" aria-label="本平台草稿" aria-busy="${busy}"><div class="guide-delivery-result"><div><strong>${icon('file')}${ready?'图文已保存在本平台':'创作内容保存在本平台'}</strong><p>直接在对话里继续修改，准备发布时再送入小红书草稿。</p>${state.guidePublishPrompt&&!boundAccount?'<p class="guide-local-login-hint" role="status">首次送入小红书时，请在上方扫码并确认绑定账号，之后送稿会自动检查保存的登录状态。</p>':boundAccount?`<small>目标账号：${h(xhsRecordName(record))}${xhsRecordConnected(record)?'':' · 送稿时自动检查登录'}</small>`:''}</div>${ready?`<div class="guide-delivery-actions"><button class="button button-secondary" type="button" data-action="guide-xhs-first" data-account-id="${h(boundAccount?targetId:'')}" ${busy||record?.busy||state.xhsAccountBusy?'disabled':''}>${icon('arrow')}送入小红书草稿</button></div>`:''}</div></section>`;
+  return `<section class="guide-xhs-delivery guide-local-draft" aria-label="本平台草稿" aria-busy="${busy}"><div class="guide-delivery-result"><div><strong>${icon('file')}${ready?'图文已保存在本平台':'创作内容保存在本平台'}</strong><p>${h(ready&&problem?problem:projectPlatform(project)==='xhs'?'按小红书篇幅创作，可在需要时送入草稿。':'直接在对话里继续修改，准备发布时再送入小红书草稿。')}</p>${state.guidePublishPrompt&&!boundAccount?'<p class="guide-local-login-hint" role="status">首次送入小红书时，请在上方扫码并确认绑定账号，之后送稿会自动检查保存的登录状态。</p>':boundAccount?`<small>目标账号：${h(xhsRecordName(record))}${xhsRecordConnected(record)?'':' · 送稿时自动检查登录'}</small>`:''}</div>${ready?`<div class="guide-delivery-actions"><button class="button button-secondary" type="button" data-action="guide-xhs-first" data-account-id="${h(boundAccount?targetId:'')}" ${busy||record?.busy||state.xhsAccountBusy?'disabled':''}>${icon('arrow')}${problem?'编辑送稿文案':'送入小红书草稿'}</button></div>`:''}</div></section>`;
 }
 function guideDeliveryView(project) {
   const delivery=project?.xhsDelivery;if(!delivery?.enabled)return guideLocalDraftView(project);
@@ -310,9 +323,10 @@ function guideDeliveryView(project) {
   const canSend=xhsRecordBound(target)&&accountMatch&&!busy&&!targetWorking&&!guideGenerationActive(project)&&!state.guideActionBusy;
   const canOpen=xhsRecordConnected(target)&&accountMatch&&!busy&&!targetWorking&&!guideGenerationActive(project)&&!state.guideActionBusy;
   const canRecheck=Boolean(delivery.draftId&&xhsCanRecheck(receipt)),canSaveVersion=edited&&imagesReady&&delivery.canSaveVersion!==false&&!delivery.pendingVersion;
-  const hint=edited?'当前修改还未送入小红书。直接说“把修改版存到草稿箱”，或在这里另存新版；此前草稿保留。':delivery.message||(!imagesReady?'全部图片完成后，会自动送入本次绑定账号的电脑草稿。':busy?'正在后台送稿，刷新页面不会重复上传。':verified?'已保存至电脑草稿，发布由你在小红书决定。':'图文和图片已经保留，请按提示继续处理。');
+  const problem=(canSaveVersion||imagesReady&&guideDeliveryMayContinue(delivery))&&xhsCopyProblem(project.title,project.caption);
+  const hint=problem|| (edited?'当前修改还未送入小红书。直接说“把修改版存到草稿箱”，或在这里另存新版；此前草稿保留。':delivery.message||(!imagesReady?'全部图片完成后，会自动送入本次绑定账号的电脑草稿。':busy?'正在后台送稿，刷新页面不会重复上传。':verified?'已保存至电脑草稿，发布由你在小红书决定。':'图文和图片已经保留，请按提示继续处理。'));
   const continueLabel=delivery.accountId?'继续送入草稿':`继续送至 ${xhsRecordName(target)} 草稿`;
-  return `<section class="guide-xhs-delivery ${warning?'is-warning':verified?'is-verified':''}" aria-label="创作与草稿交付进度" aria-busy="${busy}"><ol class="guide-delivery-steps">${stages.map(([label,done,kind],index)=>{const current=!done&&(kind==='delivery'?imagesReady:(kind==='generating'?planningDone:!planningDone));return `<li class="${done?'is-done':current?'is-current':''}"><span>${done?icon('check'):index+1}</span><strong>${label}</strong></li>`;}).join('')}</ol><div class="guide-delivery-result"><div><strong>${busy?'<span class="spinner spinner-small"></span>':icon(verified?'check':warning?'alert':'file')}${h(guideDeliveryLabel(project))}</strong><p>${h(hint)}</p>${delivery.accountId?`<small>目标账号：${h(delivery.accountName||delivery.accountId)}${Number(delivery.version)>1?` · 第 ${Number(delivery.version)} 版`:''}</small>`:''}${delivery.accountId&&!accountMatch?'<small class="guide-delivery-account-mismatch">原目标账号已移除，请先重新绑定该账号，平台不会改投。</small>':''}</div><div class="guide-delivery-actions">${imagesReady&&guideDeliveryMayContinue(delivery)?`<button class="button button-secondary" type="button" data-action="guide-xhs-continue" ${canContinue?'':'disabled'}>${icon('arrow')}${h(continueLabel)}</button>${!xhsRecordBound(target)?'<span>首次使用请先在上方扫码绑定账号。</span>':!xhsRecordConnected(target)?'<span>已绑定账号，送稿时会自动检查登录。</span>':''}`:''}${canRecheck?`<button class="button button-secondary" type="button" data-action="guide-xhs-recheck" data-id="${h(delivery.draftId)}" ${canOpen?'':'disabled'}>${icon('refresh')}重新核验草稿</button>`:''}${canSaveVersion?`<button class="button button-secondary" type="button" data-action="guide-xhs-version" ${canSend?'':'disabled'}>${icon('arrow')}将当前版本另存草稿</button>`:''}${['verified','filled','unknown','interrupted'].includes(delivery.status)?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${canOpen?'':'disabled'}>${verified?'打开电脑草稿':'打开官方窗口核对'} ${icon('arrow')}</button>`:''}</div></div>${delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery)?'<p class="guide-delivery-note">上次在送稿前中断，图文已保留。点击继续后才会送入电脑草稿。</p>':['unknown','filled','interrupted'].includes(delivery.status)?`<p class="guide-delivery-note">${canRecheck?'重新核验只读取已有草稿，不会再次上传。若尚未保存，请先在官方窗口保存后再核验。':'请在小红书官方窗口核对，本平台不会自动重复提交这份草稿。'}</p>`:''}${guideDeliveryHistoryView(delivery)}</section>`;
+  return `<section class="guide-xhs-delivery ${warning?'is-warning':verified?'is-verified':''}" aria-label="创作与草稿交付进度" aria-busy="${busy}"><ol class="guide-delivery-steps">${stages.map(([label,done,kind],index)=>{const current=!done&&(kind==='delivery'?imagesReady:(kind==='generating'?planningDone:!planningDone));return `<li class="${done?'is-done':current?'is-current':''}"><span>${done?icon('check'):index+1}</span><strong>${label}</strong></li>`;}).join('')}</ol><div class="guide-delivery-result"><div><strong>${busy?'<span class="spinner spinner-small"></span>':icon(verified?'check':warning?'alert':'file')}${h(guideDeliveryLabel(project))}</strong><p>${h(hint)}</p>${delivery.accountId?`<small>目标账号：${h(delivery.accountName||delivery.accountId)}${Number(delivery.version)>1?` · 第 ${Number(delivery.version)} 版`:''}</small>`:''}${delivery.accountId&&!accountMatch?'<small class="guide-delivery-account-mismatch">原目标账号已移除，请先重新绑定该账号，平台不会改投。</small>':''}</div><div class="guide-delivery-actions">${problem?'<button class="button button-secondary" type="button" data-action="guide-edit-xhs-copy">编辑送稿文案</button>':''}${!problem&&imagesReady&&guideDeliveryMayContinue(delivery)?`<button class="button button-secondary" type="button" data-action="guide-xhs-continue" ${canContinue?'':'disabled'}>${icon('arrow')}${h(continueLabel)}</button>${!xhsRecordBound(target)?'<span>首次使用请先在上方扫码绑定账号。</span>':!xhsRecordConnected(target)?'<span>已绑定账号，送稿时会自动检查登录。</span>':''}`:''}${canRecheck?`<button class="button button-secondary" type="button" data-action="guide-xhs-recheck" data-id="${h(delivery.draftId)}" ${canOpen?'':'disabled'}>${icon('refresh')}重新核验草稿</button>`:''}${canSaveVersion&&!problem?`<button class="button button-secondary" type="button" data-action="guide-xhs-version" ${canSend?'':'disabled'}>${icon('arrow')}将当前版本另存草稿</button>`:''}${['verified','filled','unknown','interrupted'].includes(delivery.status)?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${canOpen?'':'disabled'}>${verified?'打开电脑草稿':'打开官方窗口核对'} ${icon('arrow')}</button>`:''}</div></div>${delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery)?'<p class="guide-delivery-note">上次在送稿前中断，图文已保留。点击继续后才会送入电脑草稿。</p>':['unknown','filled','interrupted'].includes(delivery.status)?`<p class="guide-delivery-note">${canRecheck?'重新核验只读取已有草稿，不会再次上传。若尚未保存，请先在官方窗口保存后再核验。':'请在小红书官方窗口核对，本平台不会自动重复提交这份草稿。'}</p>`:''}${guideDeliveryHistoryView(delivery)}</section>`;
 }
 function guideCompletionNotice(project) {
   const latest=project.chatRequests?.at(-1);
@@ -358,8 +372,10 @@ async function saveGuideXhsVersion() {
 async function saveGuideFirstXhsDraft(shownAccountId) {
   const p=state.guideProject;
   if(!p||p.xhsDelivery?.enabled||!xhsEligible(p)||guideWorkActive()||xhsWorking())return;
+  if(xhsCopyProblem(p.title,p.caption))return openXhsForProject(p.id,guideTargetAccountId());
   state.guidePublishPrompt=true;
   if(!xhsRecordBound(xhsAccountRecord(guideTargetAccountId()))){
+    state.guideDeliverySettingsOpen=true;
     renderGuidance({preserve:true});
     document.querySelector('#guide-xhs-region')?.scrollIntoView({behavior:'smooth',block:'nearest'});
     return notify('图文已经保存在本平台。首次送稿请在上方扫码并确认绑定账号。');
@@ -405,7 +421,23 @@ function guideContentQualityView(project) {
   const draft = review.draft ? `<details class="guide-quality-draft"><summary>查看待调整的文字</summary>${(review.scope || []).map(field => `<section><strong>${h(fieldLabel(field))}</strong><p>${h(review.draft[field] || '')}</p></section>`).join('')}</details>` : '';
   return `<details class="guide-content-quality ${passed ? 'is-passed' : 'needs-attention'}"><summary>${working ? '<span class="spinner spinner-small"></span>' : icon(passed ? 'check' : 'file')}<strong>${h(title)}</strong><span>${working ? '处理中' : review.rewriteCount ? `已优化 ${review.rewriteCount} 轮` : '查看详情'}</span></summary><div>${scores}${scope ? `<p>审核范围 ${h(scope)}</p>` : ''}${review.error || review.summary ? `<p>${h(review.error || review.summary)}</p>` : ''}${issues ? `<ul>${issues}</ul>` : ''}${draft}<small>这是本次文字的内部编辑评分，满分 100，初始通过线 80。${review.applied === false && review.draft ? '本次候选文字保留为草稿。' : ''}</small></div></details>`;
 }
-function guideCreationView() {
+function outputSizeView(page, targetAspect) {
+  const size = formatImageDimensions(page.imageDimensions?.width, page.imageDimensions?.height);
+  const label = size ? `实际 ${size}` : '<span data-measure-output>实际尺寸未知</span>';
+  return `<p class="guide-output-size">目标 ${h(targetAspect)} · ${label}</p>`;
+}
+
+// Old projects only have a URL. Reuse the image decoded for the preview.
+app.addEventListener('load', event => {
+  const image = event.target;
+  if (!image.matches?.('.guide-created-image img')) return;
+  const label = image.closest('.guide-created-page')?.querySelector('[data-measure-output]');
+  if (!label) return;
+  const size = formatImageDimensions(image.naturalWidth, image.naturalHeight);
+  if (size) label.textContent = `实际 ${size}`;
+}, true);
+
+function guideCreationView(resultReady) {
   const g=state.guide,c=g.creation;
   if(!c)return g.creationError?`<div class="guide-creation-error guide-error" role="alert"><p>${h(g.creationError)}</p><button class="text-button" data-action="navigate" data-view="settings">检查模型设置 ${icon('arrow')}</button></div>`:'';
   const p=state.guideProject?.id===c.projectId?state.guideProject:null;
@@ -421,13 +453,28 @@ function guideCreationView() {
   const progress=active||canRetry?`<div class="guide-creation-progress"><strong>${done} / ${pages.length||g.preferences.count||0} 张已完成</strong><span>${active?h(guideDeliveryActive(p)?p.xhsDelivery?.message||'图片已完成，正在送入电脑草稿。':p.logs?.at(-1)?.message||'正在处理，完成后会自动展示。'):pages.length?'已完成的图片会保留，可继续重试其余图片。':'这次尚未生成图片，可以重新开始内容策划。'}</span></div>`:'';
   const downloads=done&&!guideGenerationActive(p)?`<a class="button button-primary" href="/api/projects/${encodeURIComponent(p.id)}/export.zip" download>${icon('download')}下载整组</a>`:'';
   const retryActions=`${canRetry?`<button class="button button-secondary" data-action="guide-retry-images">${icon('refresh')}${pages.length?'重试未完成图片':'重试这次创作'}</button>`:''}${c.error&&!active?'<button class="text-button" data-action="guide-load-result">重新读取结果</button>':''}${last&&last.status==='unknown'&&!active?'<button class="text-button" data-action="guide-chat-retry">确认上次修改结果</button>':''}`;
-  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}"><div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${h(p.title||'这次的图文作品')}</h3></div><span class="guide-creation-status ${issue?'is-warning':''}">${active?'<span class="spinner spinner-small"></span>':icon(issue?'alert':'check')}${h(status)}</span></div>${guideContentQualityView(p)}${guideDeliveryView(p)}${progress}${p.error||c.error?`<div class="guide-creation-error" role="alert">${h(c.error||p.error)}</div>`:''}${pages.length?`<div class="guide-creation-grid" data-count="${pages.length}">${pages.map((page,index)=>`<article class="guide-created-page"><div class="guide-created-image" data-aspect="${h(p.aspect)}">${page.imageUrl?`<button data-action="guide-result-preview" data-id="${h(page.id)}" aria-label="查看第 ${index+1} 张完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title||'第 '+(index+1)+' 张图文')}" loading="lazy"><span>${icon('expand')}查看大图</span></button>`:`<div class="guide-created-placeholder">${page.status==='generating'?'<span class="spinner"></span>':icon('image')}<strong>第 ${index+1} 张</strong><span>${page.status==='error'?'这张图片暂未完成':page.status==='generating'?'正在绘制…':'等待生成'}</span></div>`}</div><div class="guide-created-page-footer"><span>${String(index+1).padStart(2,'0')} · ${h(page.title)}</span>${page.imageUrl?`<a href="${h(page.imageUrl)}" download="${h(p.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}" aria-label="下载第 ${index+1} 张图片">${icon('download')}</a>`:''}</div>${page.error?`<p class="guide-created-error">${h(page.error)}</p>`:''}</article>`).join('')}</div>`:''}${p.caption||p.title?`<section class="guide-creation-copy" aria-label="帖子正文"><div class="guide-post-caption"><h4 class="sr-label">帖子正文</h4><p>${h(p.caption||'')}</p></div><div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}${xhsEligible(p)&&p.xhsDelivery?.enabled?`<button class="button button-secondary" data-action="guide-xhs-action" data-kind="open-drafts" ${!xhsRecordConnected(xhsAccountRecord(p.xhsDelivery.accountId))||xhsAccountRecord(p.xhsDelivery.accountId)?.busy||Boolean(state.xhsAccountBusy)||guideDeliveryActive(p)?'disabled':''}>${icon('arrow')}打开电脑草稿</button>`:''}</div></section>`:downloads?`<div class="guide-creation-actions">${downloads}</div>`:''}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p></article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
+  const gallery = pages.length?`<div class="guide-creation-grid" data-count="${pages.length}">${pages.map((page,index)=>`<article class="guide-created-page"><div class="guide-created-image" data-aspect="${h(p.aspect)}">${page.imageUrl?`<button data-action="guide-result-preview" data-id="${h(page.id)}" aria-label="查看第 ${index+1} 张完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title||'第 '+(index+1)+' 张图文')}" loading="lazy"><span>${icon('expand')}查看大图</span></button>`:`<div class="guide-created-placeholder">${page.status==='generating'?'<span class="spinner"></span>':icon('image')}<strong>第 ${index+1} 张</strong><span>${page.status==='error'?'这张图片暂未完成':page.status==='generating'?'正在绘制…':'等待生成'}</span></div>`}</div><div class="guide-created-page-footer"><span>${String(index+1).padStart(2,'0')} · ${h(page.title)}</span>${page.imageUrl?`<a href="${h(page.imageUrl)}" download="${h(p.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}" aria-label="下载第 ${index+1} 张图片">${icon('download')}</a>`:''}</div>${page.imageUrl ? outputSizeView(page,p.aspect) : ''}${page.error?`<p class="guide-created-error">${h(page.error)}</p>`:''}</article>`).join('')}</div>`:'';
+  const copyActions = `<div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}${!resultReady&&xhsEligible(p)&&p.xhsDelivery?.enabled?`<button class="button button-secondary" data-action="guide-xhs-action" data-kind="open-drafts" ${!xhsRecordConnected(xhsAccountRecord(p.xhsDelivery.accountId))||xhsAccountRecord(p.xhsDelivery.accountId)?.busy||Boolean(state.xhsAccountBusy)||guideDeliveryActive(p)?'disabled':''}>${icon('arrow')}打开电脑草稿</button>`:''}</div>`;
+  const copy = p.caption || p.title
+    ? `<section class="guide-creation-copy" aria-label="帖子正文"><div class="guide-post-caption"><h4 class="sr-label">帖子正文</h4><p>${h(p.caption || '')}</p></div>${resultReady ? '' : copyActions}</section>`
+    : downloads && !resultReady ? `<div class="guide-creation-actions">${downloads}</div>` : '';
+  const delivery = guideDeliveryView(p);
+  const review = guideContentQualityView(p);
+  const error = p.error || c.error ? `<div class="guide-creation-error" role="alert">${h(c.error || p.error)}</div>` : '';
+  const statusLabel = `<span class="guide-creation-status ${issue ? 'is-warning' : ''}">${active ? '<span class="spinner spinner-small"></span>' : icon(issue ? 'alert' : 'check')}${h(status)}</span>`;
+  const content = resultReady
+    ? `<div class="guide-result-tools">${statusLabel}${copyActions}<button class="text-button" type="button" data-action="guide-show-delivery">小红书草稿 ${icon('arrow')}</button></div>
+       ${error}${gallery}${delivery}${progress}${copy}${review}`
+    : `<div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${h(p.title || '这次的图文作品')}</h3></div>${statusLabel}</div>
+       ${review}${delivery}${progress}${error}${gallery}${copy}`;
+  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}">${content}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p>${message.editXhsCopy&&xhsEligible(p)&&xhsCopyProblem(p.title,p.caption)?'<button type="button" class="text-button" data-action="guide-edit-xhs-copy">编辑送稿文案</button>':''}</article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
 }
 
 function setGuideProject(project) {
   const c=state.guide.creation;if(!c||!project?.id||(c.projectId&&project.id!==c.projectId))return;
   c.projectId=project.id;c.status=project.status;c.error='';state.guideProject=project;
   state.guide.preferences=guidePreferences(project);
+  state.guide.targetPlatform=projectPlatform(project);
   state.guide.referenceImages=normalizeGuideImages(project.referenceImages);
   const last=c.lastChatRequest;
   if(last){const request=project.chatRequests?.find(item=>item.requestId===last.requestId||item.id===last.requestId);if(request)last.status=request.status;else if(project.chatMessages?.some(message=>message.requestId===last.requestId))last.status=guideProjectActive(project)?'running':'completed';if(last.restoredInput&&['running','completed'].includes(last.status)){if(state.guide.input===last.message)state.guide.input='';const sent=new Set(normalizeGuideImages(last.images).map(image=>image.id));state.guide.draftImages=state.guide.draftImages.filter(image=>!sent.has(image.id));last.restoredInput=false;}}
@@ -462,10 +509,10 @@ async function startGuideCreation({command='',retryRequest=false}={}) {
   if(!state.config?.configured){g.creationError='需求已整理好。请在模型设置中配置文字和图片模型，回来后告诉我“继续创作”即可。';saveGuidance();renderGuidance();return;}
   const source=guideSourceWithTrend(g);if(source.length>24000)return notify('完整素材加上热点信息超过 24000 字，请精简素材后再生成。原素材会保留。',true);
   if(g.xhsAutoDelivery&&!xhsRecordBound(xhsAccountRecord(guideTargetAccountId()))){g.creationError='请先选择一个已绑定的小红书账号，再开始自动送稿创作。';saveGuidance();renderGuidance();return;}
-  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString(),capture:{xhsAutoDelivery:g.xhsAutoDelivery===true,...(g.xhsAutoDelivery?{xhsAccountId:guideTargetAccountId()||null}:{})}};
+  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString(),capture:{targetPlatform:g.targetPlatform,xhsAutoDelivery:g.xhsAutoDelivery===true,...(g.xhsAutoDelivery?{xhsAccountId:guideTargetAccountId()||null}:{})}};
   if(command&&!retryRequest){g.messages.push({role:'user',content:command});g.messages=trimGuideMessages(g.messages);g.input='';}
   g.creation=c;g.creationError='';c.error='';state.guideActionBusy='create';const version=++guideCreationVersion;saveGuidance();renderGuidance({focusCreation:true});
-  try{const {project}=await api('/api/brief/create',{method:'POST',body:{requestId:c.requestId,source,style:g.preferences.style,aspect:g.preferences.aspect,count:g.preferences.count,mode:g.preferences.mode||'cards',referenceIds:g.referenceImages.map(image=>image.id),xhsAutoDelivery:c.capture?.xhsAutoDelivery===true,...(c.capture?.xhsAutoDelivery===true?{xhsAccountId:c.capture.xhsAccountId}: {})}});if(version!==guideCreationVersion||state.guide!==g)return;setGuideProject(project);}
+  try{const {project}=await api('/api/brief/create',{method:'POST',body:{requestId:c.requestId,source,style:g.preferences.style,aspect:g.preferences.aspect,count:g.preferences.count,mode:g.preferences.mode||'cards',referenceIds:g.referenceImages.map(image=>image.id),targetPlatform:projectPlatform(c.capture||g),xhsAutoDelivery:c.capture?.xhsAutoDelivery===true,...(c.capture?.xhsAutoDelivery===true?{xhsAccountId:c.capture.xhsAccountId}: {})}});if(version!==guideCreationVersion||state.guide!==g)return;setGuideProject(project);}
   catch(error){if(version!==guideCreationVersion)return;if(error.status&&error.status>=400&&error.status<500){g.creation=null;g.creationError=error.message;if(command&&!g.input)g.input=command;}else{c.status='unknown';c.error=`${error.message} 上次请求结果尚未确认，可以使用同一请求编号确认结果，不会重复创建。`;}saveGuidance();}
   finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({focusCreation:true});beginGuidePolling();}}
 }
@@ -598,12 +645,17 @@ function updateGuideStyleResults() {
   });
 }
 function resetGuideStyleFilters() {state.guideStyleCategory='all';state.guideStyleSearch='';}
+function requestedSizeHint(aspect) {
+  const size = requestedImageSize(state.config?.image, aspect);
+  return size ? `请求 ${size.replace('x', ' × ')} px` : '尺寸由模型决定';
+}
+
 function guideQuestionView(field) {
   const g=state.guide, rec=g.recommendations[field];
   const index=['style','aspect','count'].indexOf(field)+1;
   let options;
   if(field==='style')options=guideStylePickerView();
-  else if(field==='aspect')options=`<div class="guide-choices guide-aspect-choices">${[['3:4','portrait','竖版图文'],['1:1','square','方形卡片'],['16:9','landscape','横版展示']].map(([value,shape,label])=>`<button class="guide-choice ${value===rec?'recommended':''}" data-action="guide-choice" data-field="aspect" data-value="${value}"><span class="guide-ratio-icon ratio-${shape}" aria-hidden="true"></span><strong>${value}</strong><small>${label}</small>${value===rec?'<span class="choice-recommended">建议</span>':''}</button>`).join('')}</div>`;
+  else if(field==='aspect')options=`<div class="guide-choices guide-aspect-choices">${[['3:4','portrait','竖版图文'],['1:1','square','方形卡片'],['16:9','landscape','横版展示']].map(([value,shape,label])=>`<button class="guide-choice ${value===rec?'recommended':''}" data-action="guide-choice" data-field="aspect" data-value="${value}"><span class="guide-ratio-icon ratio-${shape}" aria-hidden="true"></span><strong>${value}</strong><small>${label} · ${h(requestedSizeHint(value))}</small>${value===rec?'<span class="choice-recommended">建议</span>':''}</button>`).join('')}</div>`;
   else {const counts=[...new Set([1,3,5,6,8,10,Number(rec)])].filter(n=>n>=1&&n<=10).sort((a,b)=>a-b);options=`<div class="guide-count-choices">${counts.map(n=>`<button class="guide-choice ${n===rec?'recommended':''}" data-action="guide-choice" data-field="count" data-value="${n}"><strong>${n} 张</strong>${n===rec?'<span class="choice-recommended">建议</span>':''}</button>`).join('')}</div><div class="guide-custom-count"><label for="guide-custom-count">也可以自定张数</label><input id="guide-custom-count" type="number" min="1" max="10" value="${rec}" aria-label="自定义图片张数"><button class="button button-secondary" data-action="guide-count">确定</button></div>`;}
   return `<section class="guide-question"><span class="section-index">${String(index).padStart(2,'0')} / ${guideFieldLabel(field)}</span><h3>${guideQuestion(field)}</h3><p>${h(g.reasons[field]||'选择你更喜欢的方向，也可以在下面直接告诉我。')}</p>${options}${state.guideEdit?'<button class="text-button" data-action="guide-cancel-edit">保留原选择</button>':''}</section>`;
 }
@@ -617,6 +669,7 @@ function renderGuidance({focusTrends=false,focusCreation=false,preserve=false}={
   if(state.view!=='briefing')return;
   const thread=document.querySelector('.guide-thread'),focused=document.activeElement;
   const previousScroll=thread?.scrollTop||0,nearBottom=!thread||thread.scrollHeight-thread.scrollTop-thread.clientHeight<95;
+  const wasShowingResult = Boolean(thread?.closest('.is-result'));
   const previousChat=thread?.querySelector('.guide-project-chat')?.textContent||'';
   const inputFocused=focused?.id==='guide-input',focusId=inputFocused||focused?.id==='guide-history-search'||focused?.closest('#guide-xhs-region')?focused?.id:null,selection=typeof focused?.selectionStart==='number'?[focused.selectionStart,focused.selectionEnd]:null;
   const pageScroll=window.scrollY;
@@ -626,7 +679,10 @@ function renderGuidance({focusTrends=false,focusCreation=false,preserve=false}={
     const next=document.querySelector('.guide-thread');if(!next)return;
     const nextChat=next.querySelector('.guide-project-chat')?.textContent||'';
     const hasNewChat=Boolean(nextChat.trim())&&nextChat!==previousChat;
-    if(preserve&&(inputFocused||!nearBottom||(state.guide.creation&&!hasNewChat)))next.scrollTop=previousScroll;
+    const showResultStart = next.closest('.is-result') &&
+      (focusCreation || (!wasShowingResult && !state.guide.creation?.lastChatRequest));
+    if(showResultStart)next.scrollTop=0;
+    else if(preserve&&(inputFocused||!nearBottom||(state.guide.creation&&!hasNewChat)))next.scrollTop=previousScroll;
     else{
       let target=focusTrends?next.querySelector('.guide-trend-matches'):next.querySelector('.guide-style-picker')?.closest('.guide-question');
       if(focusCreation&&!focusTrends){
@@ -667,7 +723,7 @@ async function sendGuidance({retry=false,rematch=false}={}) {
   g.error='';g.creationError='';g.pending=true;state.guideBusy=true;state.guideEdit=null;
   let shouldCreate=false;const version=++guideRequestVersion;saveGuidance();renderGuidance();
   try{
-    const result=await api('/api/brief/chat',{method:'POST',body:{messages,preferences,matchTrends:g.matchTrends,clarificationAsked:g.clarificationAsked,referenceIds:g.referenceImages.map(image=>image.id)}});
+    const result=await api('/api/brief/chat',{method:'POST',body:{messages,preferences,targetPlatform:g.targetPlatform,matchTrends:g.matchTrends,clarificationAsked:g.clarificationAsked,referenceIds:g.referenceImages.map(image=>image.id)}});
     if(version!==guideRequestVersion)return;
     if(typeof result.analysis!=='string'||typeof result.source!=='string'||!result.source.trim()||!result.recommendations)throw new Error('分析结果不完整，请重试。');
     let decision=normalizeGuideDecision(result.decision);
@@ -1111,7 +1167,7 @@ function xhsDetailWorkspaceView() {
   </div>`;
 }
 function xhsManagementView() {
-  return state.xhsSection==='overview'||!xhsAccounts().length&&!state.xhs.account?xhsAccountsView():xhsDetailWorkspaceView();
+  return state.xhsSection==='overview'||!xhsAccounts().length&&!state.xhs.account&&!state.xhsProjectId?xhsAccountsView():xhsDetailWorkspaceView();
 }
 function xhsView() {
   if(!state.xhs)return `<section id="xhs-page" class="xhs-page xhs-management"><div class="panel xhs-loading" role="status">${state.xhsLoading?'<span class="spinner"></span>':''}<h2>${state.xhsError?'暂时没有连接上账号工作台':'正在准备小红书工作台'}</h2><p>${h(state.xhsError||'读取账号连接与草稿记录…')}</p>${state.xhsError?'<button class="button button-secondary" data-action="xhs-reload">重新连接</button>':''}</div></section>`;
@@ -1290,8 +1346,15 @@ function acceptXhs(payload) {
   if(!snapshot?.connection||!snapshot?.status||!Array.isArray(snapshot.drafts))throw new Error('小红书工作台数据不完整，请重新读取。');
   const oldId=xhsAccountId(),oldProfile=xhsProfileId(),newId=String(snapshot.account?.id||'');state.xhs=snapshot;
   if(state.xhsSection==='auto')state.xhsSection='overview';
-  if(!xhsAccounts().length&&!snapshot.account)state.xhsSection='overview';
-  if(oldProfile!==xhsProfileId()||oldId!==newId){closeXhsDetail({restoreFocus:false});state.xhsNoteSearch='';state.xhsDraftSearch='';state.xhsTab=state.xhsLocation.tabs[xhsProfileId()]||'analytics';state.xhsDraftSource='official';state.xhsComposerOpen=false;if(oldId||oldProfile){++xhsDraftRequestVersion;state.xhsProjectId='';state.xhsPreview=null;state.xhsError='';}}
+  if(!xhsAccounts().length&&!snapshot.account&&!state.xhsProjectId)state.xhsSection='overview';
+  if(oldProfile!==xhsProfileId()||oldId!==newId){
+    const keepLocalPreview=state.xhsPreview&&!state.xhsPreview.accountId&&!oldId&&(!oldProfile||oldProfile===xhsProfileId());
+    closeXhsDetail({restoreFocus:false});state.xhsNoteSearch='';state.xhsDraftSearch='';state.xhsDraftSource='official';
+    if(!keepLocalPreview){
+      state.xhsTab=state.xhsLocation.tabs[xhsProfileId()]||'analytics';state.xhsComposerOpen=false;
+      if(oldId||oldProfile){++xhsDraftRequestVersion;state.xhsProjectId='';state.xhsPreview=null;state.xhsError='';}
+    }
+  }
   if(state.xhsPreview&&!state.xhsPreview.accountId&&newId)state.xhsPreview.accountId=newId;
   if(!state.guide.creation&&state.guide.xhsAutoDelivery&&state.guide.xhsTargetAccountId===null&&newId){state.guide.xhsTargetAccountId=newId;saveGuidance();}
   return snapshot;
@@ -1304,7 +1367,7 @@ function updateXhsComposerState() {
   [['#xhs-title-count',titleLength,20],['#xhs-content-count',contentLength,1000]].forEach(([selector,count,max])=>{const el=form.querySelector(selector);if(el){el.textContent=`${count} / ${max}`;el.classList.toggle('is-error',count>max);}});
   const valid=xhsBound()&&preview.accountId===xhsAccountId()&&preview.title.trim()&&titleLength<=20&&contentLength<=1000&&!xhsWorking()&&!existing;
   const button=form.querySelector('#xhs-submit-draft');if(button){button.disabled=!valid;button.innerHTML=state.xhsBusy==='draft'?'<span class="spinner spinner-small"></span>'+(!xhsConnected()?'正在检查绑定账号':'正在准备'):existing?'这份作品已有待核验草稿':icon('arrow')+(!xhsConnected()&&xhsBound()?'检查登录并送入草稿':previous?.status==='verified'?'准备当前版本的电脑草稿':'确认送入电脑草稿');}
-  const note=form.querySelector('#xhs-submit-notice');if(note){note.textContent=existing?`这份作品${XHS_DRAFT_LABELS[existing.status]||'已有草稿记录'}，请打开电脑草稿核对，避免重复送出。`:!xhsBound()?'首次使用请先扫码绑定小红书账号。':titleLength>20?'标题超过 20 字，请调整后再送出。':contentLength>1000?'正文超过 1000 字，请调整后再送出。':!preview.title.trim()?'请填写小红书标题。':!xhsConnected()?'账号已绑定。本次点击将自动检查保存的登录状态，通过后送稿；需要重新登录时会提示。':previous?.status==='verified'?'已有电脑草稿已核验。相同内容会复用记录；调整标题、正文或图片后会另存新版，原草稿不会被覆盖。':previous?.status==='failed'?'这份作品有未完成的草稿记录。同一版本请在下方查看原因或重新准备；修改内容可另存新版。':'';note.classList.toggle('is-error',titleLength>20||contentLength>1000);note.hidden=!note.textContent;}
+  const note=form.querySelector('#xhs-submit-notice');if(note){note.textContent=existing?`这份作品${XHS_DRAFT_LABELS[existing.status]||'已有草稿记录'}，请打开电脑草稿核对，避免重复送出。`:titleLength>20||contentLength>1000?xhsCopyProblem(preview.title,preview.content):!xhsBound()?'首次使用请先扫码绑定小红书账号。':!preview.title.trim()?'请填写小红书标题。':!xhsConnected()?'账号已绑定。本次点击将自动检查保存的登录状态，通过后送稿；需要重新登录时会提示。':previous?.status==='verified'?'已有电脑草稿已核验。相同内容会复用记录；调整标题、正文或图片后会另存新版，原草稿不会被覆盖。':previous?.status==='failed'?'这份作品有未完成的草稿记录。同一版本请在下方查看原因或重新准备；修改内容可另存新版。':'';note.classList.toggle('is-error',titleLength>20||contentLength>1000);note.hidden=!note.textContent;}
 }
 function updateXhs() {
   if(state.view==='briefing'){updateGuideXhs();return;}
@@ -1377,9 +1440,14 @@ function chooseXhsProject(id) {
   const p=state.projects.find(project=>project.id===id&&xhsEligible(project));state.xhsProjectId=p?.id||'';state.xhsPreview=p?{title:p.title||'',content:p.caption||'',accountId:xhsAccountId()}:null;
   replaceXhsRegion('#xhs-composer-region',xhsComposerView());updateXhsComposerState();
 }
-async function openXhsForProject(id) {
+async function openXhsForProject(id,accountId) {
   ++xhsDraftRequestVersion;
   const p=state.projects.find(project=>project.id===id)||state.guideProject;if(!p||p.id!==id||!xhsEligible(p))return notify('请等文案和全部图片完成后，再准备小红书草稿。',true);
+  if(accountId&&accountId!==xhsAccountId()){
+    const target=xhsAccountRecord(accountId);
+    if(target?.profileId)await selectXhsAccount(target.profileId,{tab:'drafts'});
+    if(accountId!==xhsAccountId())return notify('请重新绑定目标账号后再编辑这份送稿。',true);
+  }
   state.xhsSection='detail';state.xhsTab='drafts';state.xhsComposerOpen=true;state.xhsProjectId=id;state.xhsPreview={title:p.title||'',content:p.caption||'',accountId:xhsAccountId()};rememberXhsLocation();state.view='xhs';const url=new URL(location.href);url.searchParams.set('view','xhs');window.history.replaceState({},'',url);render();updateXhsComposerState();await loadXhs({quiet:true,refreshProjects:true});state.xhsSection='detail';state.xhsTab='drafts';state.xhsComposerOpen=true;rememberXhsLocation();updateXhs();const disclosure=document.querySelector('#xhs-composer-disclosure');if(disclosure)disclosure.open=true;document.querySelector('#xhs-composer-region')?.scrollIntoView({behavior:'smooth',block:'start'});
 }
 async function runXhsAction(kind,{accountId='',profileId=''}={}) {
@@ -1918,9 +1986,9 @@ function settingsView() {
 function providerSettings(kind,title,description,c = {}) {
   const isImage=kind==='image';
   const result=state.testResults[kind];
-  const sizes=['1024x1536','1024x1024','1536x1024','1024x1792','1792x1024','auto'];
+  const sizes=Object.keys(imageSizeOptions);
   if (c.size && !sizes.includes(c.size)) sizes.unshift(c.size);
-  return `<section class="panel provider-panel"><div class="provider-heading"><span class="provider-icon">${icon(isImage?'image':'file')}</span><div><h2>${title}</h2><p>${description}</p></div><span class="key-status ${c.hasKey?'has-key':''}">${c.hasKey?'密钥已保存':'未配置密钥'}</span></div><label class="field-label" for="${kind}-baseUrl">API Base URL</label><input id="${kind}-baseUrl" name="${kind}.baseUrl" type="url" value="${h(c.baseUrl)}" placeholder="https://api.example.com/v1" required autocomplete="off"/><div class="model-label"><label class="field-label" for="${kind}-model">模型 ID</label><button type="button" class="text-button" data-action="load-models" data-kind="${kind}" ${state.busy ? 'disabled' : ''}>${buttonBusy(`models-${kind}`)}读取模型列表</button></div><input id="${kind}-model" name="${kind}.model" value="${h(c.model)}" list="${kind}-models" placeholder="输入中转站支持的模型 ID" required autocomplete="off"/><datalist id="${kind}-models">${state.models[kind].map(m=>`<option value="${h(m)}"></option>`).join('')}</datalist><label class="field-label" for="${kind}-apiKey">API Key</label><input id="${kind}-apiKey" name="${kind}.apiKey" type="password" placeholder="${c.hasKey?'已保存 · 留空保留现有密钥':'输入你的 API Key'}" autocomplete="new-password" spellcheck="false"/><p class="field-help">${c.hasKey?'已保存的密钥不会显示。需要更换时，填写新密钥并保存。':'密钥只提交给本地服务，请勿将本地配置文件对外分享。'}</p>${isImage?`<div class="settings-options"><div><label class="field-label" for="image-mode">图片接口格式</label><select id="image-mode" name="image.mode"><option value="images" ${c.mode==='images'?'selected':''}>Images · /images/generations</option><option value="chat" ${c.mode==='chat'?'selected':''}>Chat · /chat/completions</option></select></div><div><label class="field-label" for="image-size">默认图片尺寸</label><select id="image-size" name="image.size">${sizes.map(size=>`<option value="${h(size)}" ${c.size===size?'selected':''}>${h(size)}</option>`).join('')}</select></div></div><p class="field-help">部分生图模型通过 Chat 接口返回图片，请以你的中转站说明为准。</p>`:''}<div class="provider-footer"><button type="button" class="button button-secondary" data-action="test" data-kind="${kind}" ${state.busy || !c.hasKey ? 'disabled' : ''}>${buttonBusy(`test-${kind}`)||icon('bolt')}${isImage?'测试生图（可能计费）':'测试文本连接（可能计费）'}</button><span>使用已保存的配置</span></div>${result?`<div class="test-result ${result.ok?'success':'failure'}">${icon(result.ok?'check':'alert')}<span>${h(result.message)}</span></div>`:''}</section>`;
+  return `<section class="panel provider-panel"><div class="provider-heading"><span class="provider-icon">${icon(isImage?'image':'file')}</span><div><h2>${title}</h2><p>${description}</p></div><span class="key-status ${c.hasKey?'has-key':''}">${c.hasKey?'密钥已保存':'未配置密钥'}</span></div><label class="field-label" for="${kind}-baseUrl">API Base URL</label><input id="${kind}-baseUrl" name="${kind}.baseUrl" type="url" value="${h(c.baseUrl)}" placeholder="https://api.example.com/v1" required autocomplete="off"/><div class="model-label"><label class="field-label" for="${kind}-model">模型 ID</label><button type="button" class="text-button" data-action="load-models" data-kind="${kind}" ${state.busy ? 'disabled' : ''}>${buttonBusy(`models-${kind}`)}读取模型列表</button></div><input id="${kind}-model" name="${kind}.model" value="${h(c.model)}" list="${kind}-models" placeholder="输入中转站支持的模型 ID" required autocomplete="off"/><datalist id="${kind}-models">${state.models[kind].map(m=>`<option value="${h(m)}"></option>`).join('')}</datalist><label class="field-label" for="${kind}-apiKey">API Key</label><input id="${kind}-apiKey" name="${kind}.apiKey" type="password" placeholder="${c.hasKey?'已保存 · 留空保留现有密钥':'输入你的 API Key'}" autocomplete="new-password" spellcheck="false"/><p class="field-help">${c.hasKey?'已保存的密钥不会显示。需要更换时，填写新密钥并保存。':'密钥只提交给本地服务，请勿将本地配置文件对外分享。'}</p>${isImage?`<div class="settings-options"><div><label class="field-label" for="image-mode">图片接口格式</label><select id="image-mode" name="image.mode"><option value="images" ${c.mode==='images'?'selected':''}>Images · /images/generations</option><option value="chat" ${c.mode==='chat'?'selected':''}>Chat · /chat/completions</option></select></div><div><label class="field-label" for="image-size">Images 请求尺寸</label><select id="image-size" name="image.size">${sizes.map(size=>`<option value="${h(size)}" ${c.size===size?'selected':''}>${h(imageSizeOptions[size] || size)}</option>`).join('')}</select></div></div><p class="field-help">Images 模式按所选尺寸发起请求。Chat 模式通过提示词传达构图比例。每张成品会显示实际像素尺寸。</p>`:''}<div class="provider-footer"><button type="button" class="button button-secondary" data-action="test" data-kind="${kind}" ${state.busy || !c.hasKey ? 'disabled' : ''}>${buttonBusy(`test-${kind}`)||icon('bolt')}${isImage?'测试生图（可能计费）':'测试文本连接（可能计费）'}</button><span>使用已保存的配置</span></div>${result?`<div class="test-result ${result.ok?'success':'failure'}">${icon(result.ok?'check':'alert')}<span>${h(result.message)}</span></div>`:''}</section>`;
 }
 
 app.addEventListener('input', event => {
@@ -1977,9 +2045,14 @@ app.addEventListener('change', async event => {
   const el=event.target;
   if(el.closest('#settings-form')){state.settingsRevision++;state.settingsDirty=true;captureSettingsDraft();updateSettingsDraftStatus();}
   if(el.closest('#dingtalk-config-form')){captureDingtalkDraft();return;}
+  if(el.id==='guide-target-platform'&&!state.guide.creation&&!state.guideBusy){
+    state.guide.targetPlatform=el.value==='xhs'?'xhs':'generic';
+    if(state.guide.targetPlatform==='generic')state.guide.xhsAutoDelivery=false;
+    saveGuidance();renderGuidance({preserve:true});return;
+  }
   if(el.id==='guide-xhs-auto-delivery'){
     if(state.guide.creation)return;
-    state.guide.xhsAutoDelivery=el.checked;if(el.checked&&state.guide.xhsTargetAccountId===null&&xhsAccountId())state.guide.xhsTargetAccountId=xhsAccountId();saveGuidance();renderGuidance({preserve:true});return;
+    state.guide.xhsAutoDelivery=el.checked;if(el.checked)state.guide.targetPlatform='xhs';if(el.checked&&state.guide.xhsTargetAccountId===null&&xhsAccountId())state.guide.xhsTargetAccountId=xhsAccountId();saveGuidance();renderGuidance({preserve:true});return;
   }
   if(el.id==='guide-xhs-target-account'){if(!state.guide.creation?.capture?.xhsAutoDelivery&&!state.guideProject?.xhsDelivery?.accountId){state.guide.xhsTargetAccountId=el.value;saveGuidance();renderGuidance({preserve:true});}return;}
   if(el.id==='history-page-size'){const size=Number(el.value);if(![12,24,48].includes(size))return;state.historyPageSize=size;state.historyPage=1;updateHistoryResults();return;}
@@ -2065,8 +2138,18 @@ app.addEventListener('click', async event => {
     if(action==='xhs-reload')await loadXhs({quiet:Boolean(state.xhs),refreshProjects:true});
     if(action==='xhs-action')await runXhsAction(button.dataset.kind);
     if(action==='guide-xhs-action')await runXhsAction(button.dataset.kind,{accountId:guideTargetAccountId()});
+    if(action==='guide-show-delivery'){
+      const delivery = app.querySelector('.guide-xhs-delivery');
+      if(delivery){
+        delivery.tabIndex = -1;
+        delivery.focus({preventScroll:true});
+        delivery.scrollIntoView({block:'start'});
+      }
+      return;
+    }
     if(action==='guide-xhs-continue')await continueGuideXhsDelivery();
     if(action==='guide-xhs-version')await saveGuideXhsVersion();
+    if(action==='guide-edit-xhs-copy'&&state.guideProject)await openXhsForProject(state.guideProject.id,guideTargetAccountId());
     if(action==='guide-xhs-first')await saveGuideFirstXhsDraft(button.dataset.accountId);
     if(action==='guide-xhs-recheck')await recheckXhsDraft(id,{fromGuide:true});
     if(action==='xhs-for-project')await openXhsForProject(id);

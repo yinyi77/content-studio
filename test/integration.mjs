@@ -7,6 +7,7 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { formatImageDimensions, requestedImageSize } from '../public/image-specs.js';
 
 // All model calls in this suite are served by a local mock. No credentials,
 // production data, browser sessions, or external model APIs are used.
@@ -16,6 +17,21 @@ const secret = 'test-only-secret-must-not-leak';
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jBuoAAAAASUVORK5CYII=', 'base64');
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+test('target ratio and provider request size are independent of delivered pixels', () => {
+  for (const [aspect, compatible, exact] of [
+    ['3:4', '1024x1536', '1152x1536'],
+    ['1:1', '1024x1024', '1024x1024'],
+    ['16:9', '1536x1024', '1536x864'],
+  ]) {
+    assert.equal(requestedImageSize({ size: 'auto' }, aspect), compatible);
+    assert.equal(requestedImageSize({ size: 'exact' }, aspect), exact);
+    assert.equal(requestedImageSize({ size: '1024x1792' }, aspect), '1024x1792');
+    assert.equal(requestedImageSize({ mode: 'chat', size: 'exact' }, aspect), null);
+  }
+  assert.equal(formatImageDimensions(1536, 1024), '1536 × 1024 px（3:2）');
+  assert.equal(formatImageDimensions(undefined, 1024), '');
+});
 
 async function request(route, options = {}) {
   const { method = 'GET', body, origin = base, headers = {} } = options;
@@ -192,6 +208,8 @@ test('local content studio: mocked end-to-end workflow and isolation', { timeout
     assert.equal(project.pages.filter(p => p.status === 'done').length, 2);
     const call = incoming.find(c => c.path === '/v1/images/generations');
     assert.ok(call.body.prompt.includes('用户编辑后的唯一权威文案'));
+    assert.equal(call.body.size, '1024x1536');
+    assert.deepEqual(project.pages[0].imageDimensions, { width: 1, height: 1 });
     const imageRes = await fetch(`${base}${project.pages[0].imageUrl}`);
     assert.equal(imageRes.status, 200);
     assert.deepEqual(Buffer.from(await imageRes.arrayBuffer()), png);
@@ -206,6 +224,27 @@ test('local content studio: mocked end-to-end workflow and isolation', { timeout
     assert.equal(archive.readUInt32LE(archive.length - 22), 0x06054b50);
     assert.ok(archive.includes(png));
     assert.ok(!archive.includes(Buffer.from(secret)));
+    const page = project.pages[0];
+    const promptsDir = path.join(dataDir, 'projects', projectId, 'prompts');
+    const snapshotPath = path.join(promptsDir, path.parse(page.imageUrl).name + '.md');
+    assert.equal(await readFile(snapshotPath, 'utf8'), call.body.prompt);
+    assert.ok(archive.includes(Buffer.from(call.body.prompt)));
+
+    // Simulate opening an older project after the prompt rules have changed.
+    await rm(snapshotPath);
+    const legacyPrompt = '旧版生成时实际提交的提示词，仅保存在本机归档。';
+    const legacyPath = path.join(promptsDir, page.id + '.md');
+    await writeFile(legacyPath, legacyPrompt);
+    async function exportAgain() {
+      const result = await fetch(`${base}/api/projects/${projectId}/export.zip`);
+      assert.equal(result.status, 200);
+      return Buffer.from(await result.arrayBuffer());
+    }
+    const legacyArchive = await exportAgain();
+    assert.ok(legacyArchive.includes(Buffer.from(legacyPrompt)));
+    assert.ok(legacyArchive.includes(Buffer.from('未按图片版本归档')));
+    await rm(legacyPath);
+    assert.ok((await exportAgain()).includes(Buffer.from('实际生成记录缺失')));
   });
 
   await t.test('single-page retry accepts remote images without forwarding credentials', async () => {

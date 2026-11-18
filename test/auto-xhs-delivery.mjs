@@ -120,6 +120,34 @@ test('chat generation automatically delivers once to its bound desktop account w
     const changed=await request('/api/brief/create',{method:'POST',body:{...input,xhsAutoDelivery:true}});assert.equal(changed.response.status,409,changed.raw);
   });
 
+  await t.test('XHS-targeted writing is available offline and independent of automatic delivery',async()=>{
+    const before=(await calls()).length;
+    const {input,initial}=await create({count:1,targetPlatform:'xhs',xhsAutoDelivery:false});
+    const result=await waitProject(initial.id,p=>!active(p));
+    assert.equal(result.status,'completed');assert.equal(result.targetPlatform,'xhs');
+    assert.equal(result.xhsDelivery,undefined);assert.equal((await calls()).length,before);
+    const plan=incoming.filter(item=>item.path==='/v1/chat/completions'&&item.input.messages[0].content.includes('中文图文内容策划与视觉导演')).at(-1);
+    assert.match(plan.input.messages[0].content,/目标平台为小红书/);
+    const replay=await request('/api/brief/create',{method:'POST',body:{...input,targetPlatform:'generic'}});
+    assert.equal(replay.response.status,409);
+    const over=await request(`/api/projects/${result.id}`,{method:'PATCH',body:{title:'🌿'.repeat(21)}});
+    assert.equal(over.response.status,400);assert.match(over.raw,/21\/20/);
+  });
+
+  await t.test('an over-limit generic copy stays in the conversation for editing before any browser check',async()=>{
+    const before=(await calls()).length;
+    const {initial}=await create({count:1,targetPlatform:'generic',xhsAutoDelivery:false});
+    await waitProject(initial.id,p=>!active(p));
+    const title='🌿'.repeat(21),caption='字'.repeat(1001);
+    const edit=await request(`/api/projects/${initial.id}`,{method:'PATCH',body:{title,caption}});
+    assert.equal(edit.response.status,200,edit.raw);
+    const queue=await request(`/api/projects/${initial.id}/xhs-delivery`,{method:'POST',body:{newVersion:true}});
+    assert.equal(queue.response.status,400);assert.match(queue.raw,/21\/20/);assert.match(queue.raw,/1001\/1000/);
+    const result=await chat(initial.id,'把当前版本存到草稿箱');
+    assert.equal(result.chatMessages.at(-1).editXhsCopy,true);assert.equal(result.xhsDelivery,undefined);
+    assert.equal(result.title,title);assert.equal(result.caption,caption);assert.equal((await calls()).length,before);
+  });
+
   await t.test('unconnected creation stays local until a deliberate same-account continuation',async()=>{
     const made=await create({count:1}),p=await waitProject(made.initial.id,p=>!active(p)&&p.xhsDelivery?.status==='blocked');
     assert.equal(p.status,'completed');assert.equal(p.pages.length,1);assert.equal(p.xhsDelivery.accountId,null);assert.equal((await draftCalls()).length,0);

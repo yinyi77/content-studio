@@ -1,9 +1,12 @@
 import http from 'node:http';
+import { projectPlatform, xhsCopyProblem } from './public/publishing-platform.js';
+import { imageSizeOptions } from './public/image-specs.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { randomUUID, randomBytes, createHash } from 'node:crypto';
 import { Storage, zip } from './lib/storage.mjs';
+import { promptForExport } from './lib/export-prompts.mjs';
 import { styles, modes, planningMessages, renderingPrompt } from './lib/prompts.mjs';
 import { normalizeBase, textCompletion, parsePlan, listModels, generateImage } from './lib/providers.mjs';
 import { contentFingerprint, readerFields, reviewAndImproveContent } from './lib/content-quality.mjs';
@@ -96,8 +99,8 @@ function safeConfig() {
 }
 function requireConfig(kind) { if (!ready(kind)) fail(`请先在模型设置中配置${kind === 'text' ? '文字' : '生图'}模型的地址、API Key 和模型名称`); }
 function validateXhsCopy(title, content) {
-  if (Array.from(title).length > 20) fail('小红书标题超过20个字符，请先在对话中缩短标题再存草稿');
-  if (Array.from(content).length > 1000) fail('小红书正文超过1000个字符，请先在对话中精简正文再存草稿');
+  const problem = xhsCopyProblem(title, content);
+  if (problem) fail(problem);
 }
 const referenceMetadata = images => images.map(({ id, name, mime, size, url, sha256 }) => ({ id, name, mime, size, url, sha256 }));
 function jobCapacity() { if (jobs.size >= 2) fail('已有两个任务正在运行，请等待其中一个完成后再试', 429); }
@@ -162,7 +165,7 @@ async function ensureWritingQuality(project, { candidate = project, fields, inst
   project.title = result.draft.title; project.caption = result.draft.caption;
   project.pages = result.draft.pages;
   project.contentQuality.applied = true;
-  if (project.xhsDelivery?.enabled) validateXhsCopy(project.title, project.caption);
+  if (projectPlatform(project) === 'xhs') validateXhsCopy(project.title, project.caption);
   await store.save(project);
 }
 async function render(project, pageId) {
@@ -179,12 +182,15 @@ async function render(project, pageId) {
     log(project, `正在生成第 ${project.pages.indexOf(page) + 1} 张：${page.title}`); await store.save(project);
     try {
       const prompt = await renderingPrompt(project, page);
-      await writeFile(path.join(store.dir(project.id), 'prompts', `${page.id}.md`), prompt, { mode: 0o600 });
       const references = await referenceImages.resolve(page.referenceIds ?? project.referenceIds ?? []);
       const image = await generateImage(snapshot, prompt, project.aspect, references);
-      const filename = `${page.id}-${randomUUID()}.${image.extension}`;
+      const version = `${page.id}-${randomUUID()}`;
+      const filename = `${version}.${image.extension}`;
+      await writeFile(path.join(store.dir(project.id), 'prompts', `${version}.md`), prompt, { mode: 0o600 });
       await writeFile(path.join(store.dir(project.id), 'images', filename), image.bytes, { mode: 0o600 });
-      page.imageUrl = `/media/${project.id}/${filename}`; page.status = 'done';
+      page.imageUrl = `/media/${project.id}/${filename}`;
+      page.imageDimensions = image.dimensions || null;
+      page.status = 'done';
       log(project, `第 ${project.pages.indexOf(page) + 1} 张已完成`);
     } catch (e) {
       page.status = 'error'; page.error = redact(e.message);
@@ -218,14 +224,19 @@ function beginChatRequest(project, { requestId, message, fingerprint, referenceI
   return record;
 }
 async function finishChatRequest(project, record, reply, { error = null, saveVersion = false } = {}) {
+  const copyProblem = !error && saveVersion && xhsCopyProblem(project.title, project.caption);
+  if (copyProblem) {
+    record.deliveryError = copyProblem;
+    reply = `图文已保留，本次未另存草稿：${copyProblem}。`;
+  }
   record.status = error ? 'error' : 'completed'; record.completedAt = new Date().toISOString();
   record.reply = redact(reply, 2000); record.error = error ? redact(error) : null;
   project.chatStatus = error ? 'error' : 'idle'; project.chatError = record.error;
-  chatMessage(project, 'assistant', record.reply, record.requestId, { action: record.action, status: record.status });
+  chatMessage(project, 'assistant', record.reply, record.requestId, { action: record.action, status: record.status, ...(copyProblem ? { editXhsCopy: true } : {}) });
   await store.save(project);
   // Delivery is detached from model jobs: a slow browser never turns completed
   // creative work into a model error or consumes the model-job capacity.
-  if (!error) {
+  if (!error && !copyProblem) {
     if (saveVersion) {
       try { await delivery.enqueueVersion(project.id, { accountId: record.deliveryAccountId }); }
       catch (failure) {
@@ -484,7 +495,7 @@ function updateConfig(input) {
     if (kind === 'image') {
       if (!['images', 'chat'].includes(value.mode || 'images')) fail('不支持的生图接口类型');
       const size = value.size || 'auto';
-      if (!['auto', '1024x1024', '1024x1536', '1536x1024', '1024x1792', '1792x1024'].includes(size)) fail('不支持的图片尺寸');
+      if (typeof size !== 'string' || !Object.hasOwn(imageSizeOptions, size)) fail('不支持的图片尺寸');
       next.image.mode = value.mode || 'images'; next.image.size = size;
     }
   }
@@ -492,12 +503,15 @@ function updateConfig(input) {
 }
 function newProject(input) {
   const source = str(input.source, '创作内容', 24000);
+  if (input.targetPlatform !== undefined && !['generic', 'xhs'].includes(input.targetPlatform)) fail('请选择支持的目标平台');
+  const targetPlatform = input.targetPlatform ?? (input.xhsAutoDelivery === true ? 'xhs' : 'generic');
+  if (input.xhsAutoDelivery === true && targetPlatform !== 'xhs') fail('自动送入小红书草稿时，目标平台需为小红书');
   const mode = input.mode || 'cards', style = input.style || 'notion', aspect = input.aspect || '3:4';
   if (!modes.some(x => x.id === mode) || !styles.some(x => x.id === style) || !['3:4', '1:1', '16:9'].includes(aspect)) fail('请选择支持的创作类型、风格和比例');
   const count = mode === 'cards' ? Number(input.count || 4) : 1;
   if (!Number.isInteger(count) || count < 1 || count > 10) fail('页数应为 1 到 10 的整数');
   const now = new Date().toISOString();
-  return { id: randomUUID(), title: source.split('\n')[0].slice(0, 36), source, mode, style, aspect, count, caption: '', createdAt: now, updatedAt: now, status: 'analyzing', error: null, pages: [], logs: [] };
+  return { id: randomUUID(), targetPlatform, title: source.split('\n')[0].slice(0, 36), source, mode, style, aspect, count, caption: '', createdAt: now, updatedAt: now, status: 'analyzing', error: null, pages: [], logs: [] };
 }
 async function radarSnapshot() {
   const snapshot = radar.snapshot(), notificationConfig = notifications.getSafeConfig();
@@ -557,6 +571,7 @@ async function createChatProject(input, { radarOpportunityId, origin } = {}) {
   const existing = (await store.list()).find(item => item.creationRequestId === requestId);
   if (existing) {
     if (existing.creationRequestFingerprint && existing.creationRequestFingerprint !== fingerprint) fail('这个 requestId 已用于其他创作要求，请使用新的请求编号', 409);
+    if (input.targetPlatform !== undefined && project.targetPlatform !== projectPlatform(existing)) fail('这次创作的目标平台已经固定，请使用新的请求编号', 409);
     if (input.xhsAutoDelivery !== undefined && typeof existing.xhsAutoDelivery === 'boolean' && input.xhsAutoDelivery !== existing.xhsAutoDelivery) fail('这次创作的送稿选项已经固定，请勿用同一个请求编号改变是否自动送稿', 409);
     return existing;
   }
@@ -644,10 +659,6 @@ async function decisionRoute(req, res, match) {
 }
 async function prepareXhsDraft(input, { allowDeliveryJob = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) fail('请先选择要送入小红书的作品');
-  const accountId = str(input.accountId, '目标小红书账号', 200);
-  const connected = xhsTargetSnapshot(accountId);
-  if (!connected.account?.id || connected.connection?.state !== 'connected') fail('请先连接并检查小红书账号', 409);
-  if (connected.account.id !== accountId) fail('小红书账号已变化，请重新选择作品并确认目标账号', 409);
   const project = await projectById(input.projectId);
   if (!allowDeliveryJob) ensureIdle(project);
   else if (jobs.has(project.id) || ['thinking', 'analyzing', 'generating'].includes(project.chatStatus)) fail('创作任务仍在处理中，请等待完成', 409);
@@ -655,6 +666,10 @@ async function prepareXhsDraft(input, { allowDeliveryJob = false } = {}) {
   const title = str(input.title ?? project.title, '小红书标题', 200);
   const content = str(input.content ?? project.caption, '小红书正文', 12000, true);
   validateXhsCopy(title, content);
+  const accountId = str(input.accountId, '目标小红书账号', 200);
+  const connected = xhsTargetSnapshot(accountId);
+  if (!connected.account?.id || connected.connection?.state !== 'connected') fail('请先连接并检查小红书账号', 409);
+  if (connected.account.id !== accountId) fail('小红书账号已变化，请重新选择作品并确认目标账号', 409);
   const directory = await realpath(path.join(store.dir(project.id), 'images'));
   const images = [], imageHashes = [];
   for (const page of project.pages) {
@@ -908,6 +923,8 @@ async function api(req, res, url) {
     if (!project.pages.length) fail('拆页尚未完成，请先重试分析');
     if (data.title !== undefined) project.title = str(data.title, '作品标题', 200);
     if (data.caption !== undefined) project.caption = str(data.caption, '发布文案', 12000, true);
+    if (projectPlatform(project) === 'xhs' && (data.title !== undefined || data.caption !== undefined)) validateXhsCopy(
+      data.title !== undefined ? project.title : '', data.caption !== undefined ? project.caption : '');
     if (data.pages !== undefined) {
       if (!Array.isArray(data.pages) || data.pages.length !== project.pages.length || new Set(data.pages.map(x => x.id)).size !== project.pages.length) fail('页面数量和编号必须与当前拆页方案一致');
       const updated = [];
@@ -915,7 +932,7 @@ async function api(req, res, url) {
         const page = project.pages.find(x => x.id === input.id);
         if (!page) fail('页面编号不存在');
         const title = str(input.title, '页面标题', 200), content = str(input.content, '页面文案', 4000), prompt = str(input.prompt, '画面描述', 16000);
-        if (title !== page.title || content !== page.content || prompt !== page.prompt) updated.push({ ...page, title, content, prompt, status: 'pending', imageUrl: null, error: null });
+        if (title !== page.title || content !== page.content || prompt !== page.prompt) updated.push({ ...page, title, content, prompt, status: 'pending', imageUrl: null, imageDimensions: null, error: null });
         else updated.push(page);
       }
       project.pages = updated;
@@ -951,14 +968,18 @@ async function api(req, res, url) {
       { name: '原始素材.md', body: project.source },
       { name: '作品信息.json', body: JSON.stringify(project, null, 2) },
     ];
+    const promptNotes = [];
     for (const [i, page] of project.pages.entries()) {
       const prefix = String(i + 1).padStart(2, '0');
-      files.push({ name: `prompts/${prefix}.md`, body: await renderingPrompt(project, page) });
+      const prompt = await promptForExport(store.dir(project.id), project, page);
+      files.push({ name: `prompts/${prefix}.md`, body: prompt.text });
+      if (prompt.note) promptNotes.push(`- ${prefix}.md　${prompt.note}`);
       if (page.imageUrl) {
         const filename = path.basename(page.imageUrl);
         files.push({ name: `images/${prefix}.${filename.split('.').pop()}`, body: await readFile(path.join(store.dir(project.id), 'images', filename)) });
       }
     }
+    if (promptNotes.length) files.push({ name: 'prompts/来源说明.md', body: promptNotes.join('\n') });
     const archive = zip(files);
     res.writeHead(200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="content-${project.id.slice(0, 8)}.zip"; filename*=UTF-8''${encodeURIComponent(project.title.slice(0, 60) + '.zip')}`, 'Content-Length': archive.length, 'Cache-Control': 'no-store' });
     return res.end(archive);

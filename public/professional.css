@@ -366,6 +366,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .guide-created-page-footer { min-height: 40px; border: 0; padding: 5px 0; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.8; align-items: center; }
 .guide-created-page-footer > span { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; min-width: 0; }
 .guide-created-page-footer > a { display: grid; place-items: center; width: 40px; height: 40px; flex: none; border-radius: 6px; color: var(--sub); }
+.guide-created-page .guide-output-size { margin: 0 0 6px; color: var(--sub); font-size: 12px; line-height: 1.5; }
 .guide-created-page-footer > a:hover { color: var(--accent); background: var(--accent-tint); }
 .guide-created-page-footer .icon { width: 17px; height: 17px; }
 .guide-created-placeholder { min-height: 280px; width: 100%; gap: 10px; padding: 25px; color: var(--muted); font-size: 13px; }
@@ -2969,6 +2970,8 @@ html.legacy-embedded, .legacy-embedded body { min-height: 100%; background: #f3f
 .view-briefing .admin-chat-layout textarea#guide-input { display: block; width: 100%; min-height: 64px; height: 64px; max-height: 140px; padding: 6px 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; resize: vertical; color: #344054; font-size: 14px; line-height: 1.8; }
 .view-briefing .admin-chat-layout .guide-composer-footer { grid-column: 1/-1; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; }
 .view-briefing .admin-chat-layout .guide-composer-options { display: flex; flex: 1; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-width: 0; }
+.view-briefing .guide-platform { display: inline-flex; align-items: center; gap: 6px; margin: 0; white-space: nowrap; font-size: 12px; color: var(--sub); }
+.view-briefing .guide-platform select { width: auto; height: 30px; min-height: 30px; padding: 2px 6px; font-size: 12px; }
 .view-briefing .admin-chat-layout .guide-composer-options > span { font-size: 11px; color: #8a96a8; line-height: 1.6; }
 .view-briefing .admin-chat-layout .guide-trends-toggle { gap: 6px; font-size: 12px; color: #667085; }
 .view-briefing .admin-chat-layout .guide-composer-footer > .button { min-width: 98px; min-height: 34px; margin-left: auto; font-size: 13px; flex: 0 0 auto; }
@@ -3133,3 +3136,103 @@ html.legacy-embedded, .legacy-embedded body { min-height: 100%; background: #f3f
 .view-briefing .guide-quality-draft > summary { cursor: pointer; }
 .view-briefing .guide-quality-draft section { margin-top: 12px; }
 .view-briefing .guide-quality-draft p { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* Keep completed work and its export controls together above the conversation. */
+.view-briefing .admin-chat-layout.is-result .guide-creation {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.view-briefing .is-result .guide-result-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.view-briefing .guide-result-tools .guide-creation-status {
+  display: inline-flex;
+  align-items: center;
+  margin-right: auto;
+}
+.view-briefing .guide-result-tools .guide-post-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.view-briefing .guide-result-tools .button,
+.view-briefing .guide-result-tools .text-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+.view-briefing .guide-work-context {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  color: var(--sub);
+}
+.view-briefing .guide-work-context > summary {
+  cursor: pointer;
+  font-size: 13px;
+}
+.view-briefing .guide-work-context > p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.view-briefing .admin-chat-layout.is-result .guide-work-context .guide-inline-brief {
+  margin-top: 12px;
+}
+.view-briefing .admin-chat-layout.is-result .guide-composer {
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-rows: auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+.view-briefing .admin-chat-layout.is-result .guide-composer-footer {
+  grid-column: 3;
+  grid-row: 1;
+  align-self: end;
+}
+.view-briefing .admin-chat-layout.is-result .guide-composer-options {
+  display: none;
+}
+.view-briefing .admin-chat-layout.is-result textarea#guide-input {
+  min-height: 34px;
+  height: 34px;
+  padding: 4px 0;
+  resize: none;
+}
+.view-briefing .admin-chat-layout.is-result .guide-composer:focus-within textarea#guide-input,
+.view-briefing .admin-chat-layout.is-result textarea#guide-input:not(:placeholder-shown) {
+  height: 64px;
+}
+.view-briefing .admin-chat-layout.is-result .guide-composer-footer > .button {
+  min-width: 0;
+  margin: 0;
+}
+.view-briefing .admin-chat-layout.is-result .guide-model-note:not(:has(button)) {
+  display: none;
+}
+.legacy-embedded .view-briefing:has(.is-result) .page-header {
+  min-height: 32px;
+  margin-bottom: 12px;
+}
+.legacy-embedded .view-briefing:has(.is-result) .page-header p {
+  display: none;
+}
+.legacy-embedded .view-briefing .admin-chat-layout.is-result {
+  height: calc(100dvh - 90px);
+  min-height: 320px;
+}
+@media (max-width: 620px) {
+  .view-briefing .is-result .guide-result-tools { gap: 5px; }
+  .view-briefing .guide-result-tools .guide-creation-status { flex-basis: 100%; }
+  .view-briefing .guide-result-tools .guide-post-actions { gap: 5px; }
+  .view-briefing .admin-chat-layout.is-result .guide-result-tools .button,
+  .view-briefing .admin-chat-layout.is-result .guide-result-tools .text-button { padding-inline: 8px; }
+}
