@@ -131,7 +131,8 @@ try {
         const offset=Number(url.searchParams.get('offset'));assert.ok([0,1].includes(offset));
         if(holdNextNotes){holdNextNotes=false;await new Promise(resolve=>{releaseNotes=resolve;});}
         if(notesError)return route.fulfill({status:502,json:{error:'模拟笔记读取失败'}});
-        return route.fulfill({json:{items:[{title:offset?'旧的开发手记':'新的开发手记',visibility:'private',rawCounts:['32','0'],publishedAt:offset?null:'2026-11-01T01:00:00Z',publishedTimeText:offset?'2026-10-31':''}],
+        const rawCounts=offset?['32','17']:['1.2万','3','41',null,'0'];
+        return route.fulfill({json:{items:[{title:offset?'旧的开发手记':'新的开发手记',visibility:'private',rawCounts,publishedAt:offset?null:'2026-11-01T01:00:00Z',publishedTimeText:offset?'2026-10-31':''}],
           lastSyncedAt:'2026-11-01T04:00:00Z',total:2,offset,limit:1}});
       }
       case '/api/xhs/accounts/'+accountId+'/notes':
@@ -266,12 +267,22 @@ try {
   await selectTab('published');
   const published=page.getByRole('region',{name:'已发布笔记',exact:true});
   await published.getByText('新的开发手记',{exact:true}).waitFor();
-  assert.equal(await published.getByRole('columnheader').allTextContents().then(labels=>labels.join('/')),'笔记标题/发布时间/可见范围/卡片计数');
+  const noteHeaders=['笔记标题','发布时间','可见范围','浏览','点赞','评论','收藏','分享'];
+  const publishedHeaders=published.getByRole('columnheader');
+  assert.deepEqual(await publishedHeaders.allTextContents(),noteHeaders);
   await published.getByText('仅自己可见').waitFor();
-  await published.getByText('32 / 0').waitFor();
+  const newNoteCells=published.getByRole('row').filter({hasText:'新的开发手记'}).getByRole('cell');
+  assert.deepEqual((await newNoteCells.allInnerTexts()).slice(2),['1.2万','41','3','—','0']);
   await published.getByRole('button',{name:'下一页'}).click();
   await published.getByText('旧的开发手记',{exact:true}).waitFor();
   await published.getByText('2026-10-31',{exact:true}).waitFor();
+  assert.deepEqual(await publishedHeaders.allTextContents(),[...noteHeaders,'原始计数']);
+  const olderNoteCells=published.getByRole('row').filter({hasText:'旧的开发手记'}).getByRole('cell');
+  assert.deepEqual((await olderNoteCells.allInnerTexts()).slice(2,7),['—','—','—','—','—']);
+  const originalCounts=olderNoteCells.last();
+  await originalCounts.locator('summary').click();
+  assert.match(await originalCounts.innerText(),/32[\s\S]*17/);
+  assert.equal(notesSyncSubmissions,0);
   notesError=true;
   await published.getByRole('button',{name:'刷新列表'}).click();
   await published.getByRole('alert').getByText('模拟笔记读取失败').waitFor();

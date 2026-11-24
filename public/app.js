@@ -1205,6 +1205,30 @@ function rememberNotesRequest(task, id) {
   task.requestId = id;
   try { if (id) sessionStorage.setItem(task.key,id); else sessionStorage.removeItem(task.key); } catch {}
 }
+// The desktop 笔记管理 card renders eye, speech bubble, heart, star, then share.
+const publishedCountColumns = [
+  { label: '浏览', slot: 0 },
+  { label: '点赞', slot: 2 },
+  { label: '评论', slot: 1 },
+  { label: '收藏', slot: 3 },
+  { label: '分享', slot: 4 },
+];
+function hasUnmappedNoteCounts(note) {
+  return note.rawCounts?.length > 0 && note.rawCounts.length !== publishedCountColumns.length;
+}
+function publishedCountCells(note, showRawColumn) {
+  const counts = note.rawCounts || [];
+  const knownLayout = counts.length === publishedCountColumns.length;
+  const cells = publishedCountColumns.map(({slot}) => {
+    const value = knownLayout ? counts[slot] : null;
+    return `<td class="xhs-count">${value != null && value !== '' ? h(value) : '<span class="xhs-count-missing" aria-label="暂无数据">—</span>'}</td>`;
+  }).join('');
+  if (!showRawColumn) return cells;
+  const raw = hasUnmappedNoteCounts(note)
+    ? `<details><summary>查看原始计数</summary><ol aria-label="按卡片顺序排列的计数">${counts.map(value => `<li>${h(value ?? '—')}</li>`).join('')}</ol></details>`
+    : '—';
+  return cells + `<td class="xhs-raw-counts">${raw}</td>`;
+}
 function xhsPublishedPanel() {
   const page=state.xhsPublished, loading=!page||page.loading===true, data=page?.data;
   const row=xhsSelectedAccount(), task=notesTask(row.accountId), sync=task.job || data?.sync;
@@ -1219,12 +1243,14 @@ function xhsPublishedPanel() {
   if(data) {
     const {items,total,limit,offset,lastSyncedAt}=data;
     const summary=lastSyncedAt?`<div class="xhs-official-summary"><span>已同步 ${total} 篇已发布笔记</span><span>最近同步 ${h(xhsDate(lastSyncedAt))}</span></div>`:'';
+    const showRawColumn=items.some(hasUnmappedNoteCounts);
+    const countHeaders=publishedCountColumns.map(({label})=>`<th scope="col" class="xhs-count">${label}</th>`).join('');
     const rows=items.map(note=>{
       const at=note.publishedAt&&new Date(note.publishedAt);
       const time=at&&Number.isFinite(at.getTime())?at.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):note.publishedTimeText;
-      return `<tr><th scope="row">${h(note.title||'未提供标题')}</th><td>${h(time||'—')}</td><td>${note.visibility==='private'?'仅自己可见':'未标明'}</td><td>${note.rawCounts?.length?h(note.rawCounts.join(' / ')):'—'}</td></tr>`;
+      return `<tr><th scope="row">${h(note.title||'未提供标题')}</th><td>${h(time||'—')}</td><td>${note.visibility==='private'?'仅自己可见':'未标明'}</td>${publishedCountCells(note,showRawColumn)}</tr>`;
     }).join('');
-    const table=rows?`<div class="xhs-notes-table-wrap"><table class="xhs-notes-table xhs-published-table"><thead><tr><th scope="col">笔记标题</th><th scope="col">发布时间</th><th scope="col">可见范围</th><th scope="col">卡片计数</th></tr></thead><tbody>${rows}</tbody></table></div><p class="xhs-list-footnote">计数按小红书卡片的顺序展示，平台未标注单项含义。</p>`
+    const table=rows?`<div class="xhs-notes-table-wrap" tabindex="0" role="region" aria-label="已发布笔记数据表"><table class="xhs-notes-table xhs-published-table"><thead><tr><th scope="col">笔记标题</th><th scope="col">发布时间</th><th scope="col">可见范围</th>${countHeaders}${showRawColumn?'<th scope="col">原始计数</th>':''}</tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="xhs-data-empty"><p>${lastSyncedAt?'最近同步的记录中没有已发布笔记。':'该账号尚未同步笔记。'}</p></div>`;
     const pager=total>limit?`<div class="xhs-draft-actions xhs-notes-pages"><button type="button" class="text-button" data-action="xhs-notes-page" data-kind="previous" data-offset="${Math.max(0,offset-limit)}" ${offset===0||loading?'disabled':''}>上一页</button><span>第 ${Math.floor(offset/limit)+1} / ${Math.ceil(total/limit)} 页</span><button type="button" class="text-button" data-action="xhs-notes-page" data-kind="next" data-offset="${offset+limit}" ${offset+limit>=total||loading?'disabled':''}>下一页</button></div>`:'';
     body+=summary+table+pager;

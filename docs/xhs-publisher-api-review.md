@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | 选择账号 | `GET /v1/accounts` | 用昵称和平台账号 ID 辨认，按服务账号 ID 操作。目录的 `publish_enabled` 表示该账号当前可否预约。 |
 | 看账号数据 | `GET /v1/accounts/{account_id}/metrics` | 用 `period=7d` 或 `period=30d` 读取主页累计数据和所选周期的数据。暂无快照时显示未同步，读取缓存不会启动浏览器。 |
-| 看笔记 | `GET /v1/notes` | 按账号查询已同步的笔记。平台卡片的 `metrics_raw` 保留原始顺序，单篇卡片缺少名称的计数无法归为观看或点赞。 |
+| 看笔记 | `GET /v1/notes` | 按账号查询已同步的笔记。电脑端笔记管理卡片的五项 `metrics_raw` 依次对应浏览、评论、点赞、收藏、分享。工作台按指标分列，遇到其他长度时保留原始计数供核对。 |
 | 更新统计或笔记 | `POST /v1/accounts/{account_id}/sync` | 用户点击同步时，以 `scope=metrics` 或 `scope=notes` 分别入队，查询原任务状态。同步失败时仍可查看上次成功的快照。 |
 | 存入草稿箱 | `POST /v1/jobs`，动作为 `create_draft` | 提交所选账号、标题、正文、有序图片链接及幂等键。核对任务和平台草稿后才显示已保存。 |
 | 核对草稿与配图 | `GET /v1/drafts`、`GET /v1/drafts/{draft_id}` 及其 `images/{position}` 子路径 | 查看本服务登记的草稿，图片预览绑定账号和具体内容版本。 |

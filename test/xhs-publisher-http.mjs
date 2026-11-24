@@ -100,7 +100,7 @@ test('existing project and account routes deliver via publisher and reconcile a 
   const noteAccount = { ...accountInfo, account_id: secondId, metrics: {},
     notes_sync: { status: 'succeeded', last_synced_at: noteDate, coverage: { full_scan: true, tabs: { published: 0 } } } };
   const listed = { account_id: secondId, status: 'published', title: '笔记标题', published_at: noteDate,
-    platform_time_text: '2026-11-20 13:03', metrics_raw: ['32', '0'], private: '不对外提供' };
+    platform_time_text: '2026-11-20 13:03', metrics_raw: [' 1.2万 ', ' ', null, '0', 0], private: '不对外提供' };
   let extraAccounts = [], notesCode = 200;
   const notesJob = 'job_'+'7'.repeat(32), metricsJob = 'job_'+'8'.repeat(32), syncKeys = [];
   let notesPage = { total: 21, offset: 20, limit: 20, items: [listed], last_synced_at: noteDate,
@@ -205,7 +205,7 @@ test('existing project and account routes deliver via publisher and reconcile a 
   const page = await api(notesPath);
   assert.equal(page.status, 200, 'the second account has read access while paused and separate from the delivery target');
   assert.deepEqual(page.body, {items: [{ title: listed.title, publishedAt: noteDate, publishedTimeText: listed.platform_time_text,
-    visibility: 'unknown', rawCounts:['32','0'] }], total: 21, offset: 20, limit: 20, lastSyncedAt: noteDate,
+    visibility: 'unknown', rawCounts: ['1.2万', null, null, '0', '0'] }], total: 21, offset: 20, limit: 20, lastSyncedAt: noteDate,
     sync:{jobId:notesJob,status:'failed',error:'BROWSER_BUSY'}});
   assert.deepEqual(syncKeys, [], 'reading a cached page must not submit a sync');
   const requestId = randomUUID();
