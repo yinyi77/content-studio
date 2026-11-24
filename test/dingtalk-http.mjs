@@ -119,7 +119,7 @@ test('DingTalk HTTP settings and real creative pipeline remain isolated, durable
     assert.ok((await outgoing()).some(m=>m.kind==='text'&&m.text.includes('MOCK 工具宣传')&&m.text.includes('真实使用场景')));
     const before={briefCalls,planCalls,imageCalls,out:(await outgoing()).length};messages.push(answer);await publishIncoming();await sleep(150);
     assert.deepEqual({briefCalls,planCalls,imageCalls,out:(await outgoing()).length},before,'redelivered msgId must not pay or deliver twice');
-    assert.equal((await request('/api/xhs')).value.connection.state,'disconnected');
+    assert.equal((await request('/api/xhs')).value.drafts.length,0);
   });
   await t.test('follow-up copy edits reuse the project without redrawing or resending old pictures',async()=>{
     const oldPages=structuredClone(project.pages),before=imageCalls,oldDeliveries=(await outgoing()).filter(m=>m.kind==='image').length;

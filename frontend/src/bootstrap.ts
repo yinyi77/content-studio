@@ -14,7 +14,7 @@ export const pages = [
   { view: 'briefing', title: '创作对话', icon: markRaw(MessageSquareCode) },
   { view: 'radar', title: '选题雷达', icon: markRaw(InspectionPanel) },
   { view: 'trends', title: '当下热点', icon: markRaw(Search) },
-  { view: 'xhs', title: '小红书账号', icon: markRaw(LayoutGrid) },
+  { view: 'xhs', title: '账号管理', icon: markRaw(LayoutGrid) },
   { view: 'history', title: '作品记录', icon: markRaw(BookOpenText) },
   { view: 'dingtalk', title: '钉钉接入', icon: markRaw(SquareCode) },
   { view: 'settings', title: '模型设置', icon: markRaw(Settings) },
@@ -24,7 +24,7 @@ export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/briefing' },
-    ...pages.map(page => ({ path: '/' + page.view, name: page.view, component: Empty, meta: { title: page.title, icon: page.icon, affixTab: page.view === 'briefing', keepAlive: true } })),
+    ...pages.map(page => ({ path: '/' + page.view, name: page.view, component: Empty, meta: { title: page.title, icon: page.icon, affixTab: page.view === 'briefing', keepAlive: true, fullPathKey: page.view !== 'xhs' } })),
     { path: '/:pathMatch(.*)*', redirect: '/briefing' },
   ],
 });

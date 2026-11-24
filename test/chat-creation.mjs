@@ -171,7 +171,7 @@ test('chat-only creation and follow-up use local mocked models, persisted idempo
   await t.test('local creation and chat edits need no social login and append preserves all existing images', async () => {
     const made = await create(createBody({count:1,mode:'cover'})), old = structuredClone(made.project.pages[0]), before = imageCalls;
     assert.equal(made.project.xhsAutoDelivery,false); assert.equal(made.project.xhsDelivery,undefined);
-    assert.equal((await request('/api/xhs')).value.connection.state,'disconnected');
+    assert.equal((await request('/api/xhs')).value.drafts.length,0);
     const result = await chat(made.project.id,'再给我4张配图，一张太少了',appendOutput(4));
     assert.equal(result.project.status,'completed'); assert.equal(result.project.pages.length,5); assert.equal(result.project.count,5); assert.equal(result.project.mode,'cards');
     assert.deepEqual(result.project.pages[0],old); assert.equal(imageCalls,before+4); assert.equal(result.project.xhsDelivery,undefined);

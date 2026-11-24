@@ -18,8 +18,9 @@ import { ReferenceImages, normalizeReferenceIds, withReferenceImages } from './l
 import { RadarService } from './lib/radar.mjs';
 import { NotificationService } from './lib/notifications.mjs';
 import { DecisionLinks, decisionPage } from './lib/decision-links.mjs';
-import { XhsBrowser } from './lib/xhs-browser.mjs';
-import { XhsAccountsService } from './lib/xhs-accounts.mjs';
+import { createXhsConnector } from './lib/xhs-connector.mjs';
+import { editPublisherDraft } from './lib/xhs-draft-edit.mjs';
+import { XhsSchedules } from './lib/xhs-schedules.mjs';
 import { XhsDeliveryQueue, initialXhsDelivery } from './lib/xhs-delivery.mjs';
 import { DingtalkService } from './lib/dingtalk.mjs';
 import { resolveFrontendAsset, frontendPolicy, frontendTypes } from './lib/frontend-static.mjs';
@@ -56,13 +57,11 @@ const radar = new RadarService({ dir: store.root, getTrends: () => trends.snapsh
   },
   onNotify: async opportunities => { for (const opportunity of opportunities) await notifyRadarOpportunity(opportunity); } });
 await radar.init();
-const xhs = new XhsAccountsService({ dir: store.root,
-  driverFactory: ({ profileId, legacy }) => new XhsBrowser({ dir: store.root, profileId, legacy, background: true }) });
+const xhs = await createXhsConnector({ root, dir: store.root, port });
 await xhs.init();
-function xhsTargetSnapshot(accountId) {
-  const state = accountId ? xhs.getAccountSnapshot(accountId) : xhs.snapshot();
-  if (!state) fail('目标小红书账号未绑定或已从平台移除，请重新核对', 409);
-  return state;
+const xhsSchedules = new XhsSchedules({ store, xhs });
+async function xhsTargetSnapshot(accountId) {
+  return (await xhs.forAccount(accountId)).snapshot();
 }
 const delivery = new XhsDeliveryQueue({ store, xhs, prepare: prepareXhsDraft, modelBusy: id => jobs.has(id),
   admit: work => serializeMutation(work, true), safe: message => redact(message) });
@@ -666,12 +665,11 @@ async function prepareXhsDraft(input, { allowDeliveryJob = false } = {}) {
   const title = str(input.title ?? project.title, '小红书标题', 200);
   const content = str(input.content ?? project.caption, '小红书正文', 12000, true);
   validateXhsCopy(title, content);
-  const accountId = str(input.accountId, '目标小红书账号', 200);
-  const connected = xhsTargetSnapshot(accountId);
-  if (!connected.account?.id || connected.connection?.state !== 'connected') fail('请先连接并检查小红书账号', 409);
-  if (connected.account.id !== accountId) fail('小红书账号已变化，请重新选择作品并确认目标账号', 409);
+  const accountId = str(input.accountId, '目标小红书账号', 120);
+  if (!content.trim()) fail('送入微服务草稿前请补充帖子正文。');
   const directory = await realpath(path.join(store.dir(project.id), 'images'));
   const images = [], imageHashes = [];
+  let totalBytes = 0;
   for (const page of project.pages) {
     const match = page.imageUrl.match(/^\/media\/([0-9a-f-]{36})\/([0-9a-f-]{36}-[0-9a-f-]{36}\.(?:png|jpg|webp|gif))$/);
     if (!match || match[1] !== project.id) fail('作品图片记录无效，请在作品对话中重新检查', 409);
@@ -680,10 +678,14 @@ async function prepareXhsDraft(input, { allowDeliveryJob = false } = {}) {
     if (path.dirname(image) !== directory) fail('作品图片不在本机作品目录中', 409);
     const bytes = await readFile(image);
     if (!bytes.length || bytes.length > 30 * 1024 * 1024) fail('图片文件为空或超过30MB，请重新生成或压缩后再试');
+    totalBytes += bytes.length;
+    if (totalBytes > 128 * 1024 * 1024) fail('微服务每篇最多接收 128 MiB 图片，请压缩后再送稿。');
     images.push(image); imageHashes.push(createHash('sha256').update(bytes).digest('hex'));
   }
   const fingerprint = createHash('sha256').update(JSON.stringify({ accountId, projectId: project.id, title, content, imageHashes })).digest('hex');
-  return { accountId, projectId: project.id, title, content, images, fingerprint };
+  const expectedPlatformAccountId = input.expectedPlatformAccountId === undefined ? undefined
+    : str(input.expectedPlatformAccountId, '所选小红书平台账号 ID', 200);
+  return { accountId, projectId: project.id, title, content, images, imageHashes, fingerprint, expectedPlatformAccountId };
 }
 async function api(req, res, url) {
   const method = req.method, pathname = url.pathname;
@@ -709,77 +711,110 @@ async function api(req, res, url) {
   }
   if (pathname === '/api/xhs') {
     if (method !== 'GET') fail('账号工作台仅支持读取', 405);
-    return send(res, 200, url.searchParams.has('accountId') ? xhsTargetSnapshot(str(url.searchParams.get('accountId'), '目标小红书账号', 120)) : xhs.snapshot());
+    return send(res, 200, url.searchParams.has('accountId') ? await xhsTargetSnapshot(str(url.searchParams.get('accountId'), '目标小红书账号', 120)) : xhs.snapshot());
   }
-  if (pathname === '/api/xhs/accounts') {
-    if (method === 'GET') { const snapshot = xhs.snapshot(); return send(res, 200, { accounts: snapshot.accounts, selectedProfileId: snapshot.selectedProfileId }); }
-    if (method !== 'POST') fail('账号列表仅支持读取或添加账号', 405);
-    return send(res, 201, await xhs.addAccount(await body(req)));
+  if (pathname === '/api/xhs/accounts' && method === 'GET') {
+    return send(res, 200, await xhs.listAccounts({includeMetrics: url.searchParams.get('includeMetrics') === '1'}));
   }
-  const xhsAccount = pathname.match(/^\/api\/xhs\/accounts\/([0-9a-f-]{36})(\/select)?$/i);
-  if (xhsAccount) {
-    if (xhsAccount[2]) {
-      if (method !== 'POST') fail('切换账号仅支持 POST', 405);
-      await body(req); return send(res, 200, await xhs.selectAccount(xhsAccount[1]));
-    }
-    if (method === 'GET') return send(res, 200, xhs.snapshotForProfile(xhsAccount[1]));
-    if (method === 'PATCH') return send(res, 200, await xhs.updateAccount(xhsAccount[1], await body(req)));
-    if (method === 'DELETE') { await body(req); return send(res, 200, await xhs.removeAccount(xhsAccount[1])); }
-    fail('不支持的账号操作', 405);
+  const accountMetrics = pathname.match(/^\/api\/xhs\/accounts\/([a-zA-Z0-9_-]{1,120})\/metrics$/);
+  if (accountMetrics) {
+    if (method !== 'GET') fail('指标快照仅支持读取。', 405);
+    const target = await xhs.forAccount(accountMetrics[1]);
+    return send(res, 200, await target.accountMetrics(accountMetrics[1], url.searchParams.get('period') ?? '7d'));
   }
-  const xhsAction = pathname.match(/^\/api\/xhs\/(login|check|sync|open-drafts|disconnect)$/);
-  if (xhsAction) {
-    if (method !== 'POST') fail('小红书账号操作仅支持 POST', 405);
+  if (pathname === '/api/xhs/schedules') {
+    if (method === 'GET') return send(res, 200, { schedule: await xhsSchedules.get({
+      accountId: url.searchParams.get('accountId'), receiptId: url.searchParams.get('receiptId'),
+      draftId: url.searchParams.get('draftId'),
+    }) });
+    if (method !== 'POST') fail('预约发布仅支持查询或确认提交', 405);
+    return send(res, 202, { schedule: await xhsSchedules.submit(await body(req)) });
+  }
+  const accountNotes = pathname.match(/^\/api\/xhs\/accounts\/([a-zA-Z0-9_-]{1,120})\/notes$/);
+  const accountSync = pathname.match(/^\/api\/xhs\/accounts\/([a-zA-Z0-9_-]{1,120})\/(notes|metrics)\/sync(?:\/(job_[a-f0-9]{32}))?$/);
+  if (accountSync) {
+    const [, accountId, scope, jobId] = accountSync;
+    if (method !== (jobId ? 'GET' : 'POST')) fail('同步任务只接受明确的提交或查询。', 405);
+    const input = jobId ? { jobId } : { requestId: (await body(req)).requestId };
+    const target = await xhs.forAccount(accountId);
+    return send(res, jobId ? 200 : 202, { job: await target.accountSyncJob(scope, input) });
+  }
+  if (accountNotes) {
+    if (method !== 'GET') fail('已发布笔记仅支持读取', 405);
+    const offset = url.searchParams.get('offset') ?? '0';
+    if (!/^\d+$/.test(offset)) fail('笔记分页位置无效。', 400);
+    return send(res, 200, await xhs.listPublishedNotes(accountNotes[1], Number(offset)));
+  }
+  if (pathname === '/api/xhs/check') {
+    if (method !== 'POST') fail('检查微服务仅支持 POST', 405);
     const input = await body(req);
-    const action = { login: 'startLogin', check: 'checkLogin', sync: 'startSync', 'open-drafts': 'openDrafts', disconnect: 'disconnect' }[xhsAction[1]];
-    const target = { ...(input.profileId === undefined ? {} : { profileId: str(input.profileId, '本机账号编号', 120) }),
-      ...(input.accountId === undefined ? {} : { accountId: str(input.accountId, '目标小红书账号', 120) }) };
-    return send(res, 202, await xhs[action](xhsAction[1] === 'sync' ? { ...target, noteLimit: input.noteLimit ?? 50 } : target));
-  }
-  const xhsNoteDetail = pathname.match(/^\/api\/xhs\/notes\/([A-Za-z0-9_-]{1,120})$/);
-  if (xhsNoteDetail) {
-    if (method === 'GET') return send(res, 200, xhs.getNoteDetail(xhsNoteDetail[1], { accountId: str(url.searchParams.get('accountId'), '目标小红书账号', 120) }));
-    if (method !== 'POST') fail('笔记详情仅支持读取或重新同步', 405);
-    const input = await body(req);
-    return send(res, 202, await xhs.startNoteDetail(xhsNoteDetail[1], { accountId: str(input.accountId, '目标小红书账号', 120) }));
+    const accountId = input.accountId === undefined ? undefined : str(input.accountId, '目标小红书账号', 120);
+    const target = accountId ? await xhs.forAccount(accountId) : xhs;
+    return send(res, 200, await target.checkLogin({ accountId }));
   }
   if (pathname === '/api/xhs/official-drafts/sync') {
-    if (method !== 'POST') fail('同步官方草稿仅支持 POST', 405);
+    if (method !== 'POST') fail('刷新服务草稿列表仅支持 POST', 405);
     const input = await body(req);
-    return send(res, 202, await xhs.startOfficialDraftSync({ accountId: str(input.accountId, '目标小红书账号', 120) }));
+    const accountId = str(input.accountId, '目标小红书账号', 120);
+    const target = await xhs.forAccount(accountId);
+    return send(res, 200, await target.startOfficialDraftSync({ accountId, limit: input.limit, offset: input.offset }));
   }
-  const xhsOfficialDraft = pathname.match(/^\/api\/xhs\/official-drafts\/([0-9a-f-]{36})(\/open)?$/i);
-  if (xhsOfficialDraft) {
-    if (method === 'GET' && !xhsOfficialDraft[2]) return send(res, 200, xhs.getOfficialDraftDetail(xhsOfficialDraft[1], { accountId: str(url.searchParams.get('accountId'), '目标小红书账号', 120) }));
-    if (method !== 'POST') fail('官方草稿仅支持读取、同步或打开官网', 405);
+  const draftImage = pathname.match(/^\/api\/xhs\/official-drafts\/(draft_[0-9a-f]{32})\/images\/(\d{1,2})$/);
+  if (draftImage && method === 'GET') {
+    const accountId = str(url.searchParams.get('accountId'), '目标小红书账号', 120);
+    const target = await xhs.forAccount(accountId);
+    const { bytes, mime } = await target.client.draftImage(accountId, draftImage[1], Number(draftImage[2]), Number(url.searchParams.get('contentVersion')));
+    res.writeHead(200, { 'Content-Type': mime, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'Cross-Origin-Resource-Policy': 'same-origin' });
+    return res.end(bytes);
+  }
+  const serviceDraft = pathname.match(/^\/api\/xhs\/official-drafts\/(draft_[0-9a-f]{32})$/);
+  if (serviceDraft && method === 'PATCH') {
     const input = await body(req);
-    return send(res, 202, await xhs.startOfficialDraftDetail(xhsOfficialDraft[1], { accountId: str(input.accountId, '目标小红书账号', 120), foreground: Boolean(xhsOfficialDraft[2]) }));
+    const target = await xhs.forAccount(str(input?.accountId, '目标小红书账号', 120));
+    return send(res, 202, await editPublisherDraft(target, serviceDraft[1], input, async draft => {
+      const prepared = await prepareXhsDraft({ accountId: input.accountId, projectId: input.imageProject.id,
+        title: input.changes.title ?? draft.title, content: input.changes.caption ?? draft.caption });
+      return target.delivery.prepareEditImages(prepared, { store, draftId: serviceDraft[1], version: input.contentVersion,
+        expectedImages: input.imageProject.images });
+    }));
+  }
+  if (serviceDraft && method === 'GET') {
+    const accountId = str(url.searchParams.get('accountId'), '目标小红书账号', 120);
+    const target = await xhs.forAccount(accountId);
+    return send(res, 200, await target.getOfficialDraftDetail(serviceDraft[1], { accountId, editJobId: url.searchParams.get('editJobId') }));
+  }
+  if (/^\/api\/xhs\/(?:accounts|notes|login|sync|open-drafts|disconnect|official-drafts)(?:\/|$)/.test(pathname)) {
+    fail('本机账号管理已停用。请通过小红书发布微服务管理账号。', 410);
   }
   const xhsSubmission = pathname.match(/^\/api\/xhs\/submissions\/([0-9a-f-]{36})$/i);
   if (xhsSubmission) {
     if (method !== 'GET') fail('送稿内容仅支持读取', 405);
-    const detail = await xhs.getSubmissionDetail(xhsSubmission[1], { accountId: str(url.searchParams.get('accountId'), '目标小红书账号', 120) });
-    return send(res, 200, { detail: { ...detail, source: 'local_submission', isComplete: true } });
+    const accountId = str(url.searchParams.get('accountId'), '目标小红书账号', 120);
+    const target = await xhs.forAccount(accountId);
+    const detail = await target.getSubmissionDetail(xhsSubmission[1], { accountId });
+    return send(res, 200, { detail: { ...detail, source: 'local_submission', isComplete: detail.isComplete ?? true } });
   }
   if (pathname === '/api/xhs/drafts') {
     if (method !== 'POST') fail('送入电脑草稿仅支持 POST', 405);
-    return send(res, 202, await xhs.submitDraft(await prepareXhsDraft(await body(req))));
+    const input = await prepareXhsDraft(await body(req));
+    const target = await xhs.forAccount(input.accountId);
+    return send(res, 202, await target.submitDraft(input));
   }
   const retryXhsDraft = pathname.match(/^\/api\/xhs\/drafts\/([0-9a-f-]{36})\/retry$/);
   if (retryXhsDraft) {
     if (method !== 'POST') fail('重新准备草稿仅支持 POST', 405);
     const input = await body(req);
     const accountId = str(input.accountId, '目标小红书账号', 120);
-    xhsTargetSnapshot(accountId);
-    return send(res, 202, await xhs.retryDraft(retryXhsDraft[1], { accountId }));
+    const target = await xhs.forAccount(accountId);
+    return send(res, 202, await target.retryDraft(retryXhsDraft[1], { accountId }));
   }
   const recheckXhsDraft = pathname.match(/^\/api\/xhs\/drafts\/([0-9a-f-]{36})\/recheck$/);
   if (recheckXhsDraft) {
     if (method !== 'POST') fail('重新核验草稿仅支持 POST', 405);
     const input = await body(req);
-    const accountId = str(input.accountId, '目标小红书账号', 200);
-    xhsTargetSnapshot(accountId);
-    return send(res, 202, await xhs.recheckDraft(recheckXhsDraft[1], { accountId }));
+    const accountId = str(input.accountId, '目标小红书账号', 120);
+    const target = await xhs.forAccount(accountId);
+    return send(res, 202, await target.recheckDraft(recheckXhsDraft[1], { accountId }));
   }
   if (pathname === '/api/radar') {
     if (method !== 'GET') fail('选题雷达仅支持读取', 405);
@@ -990,7 +1025,7 @@ const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; ch
 const server = http.createServer(async (req, res) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'no-referrer');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data: https://*.xhscdn.com https://*.xiaohongshu.com; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   try {
     const url = new URL(req.url, `http://127.0.0.1:${port}`);
     const decision = url.pathname.match(/^\/decision\/([A-Za-z0-9_.-]{1,1600})(?:\/(approve|skip|media)(?:\/([0-9a-f-]{36}-[0-9a-f-]{36}\.(?:png|jpg|webp|gif)))?)?$/);
@@ -1010,12 +1045,6 @@ const server = http.createServer(async (req, res) => {
     }
     if (!['GET', 'HEAD'].includes(req.method)) fail('不支持的请求', 405);
     let file, frontendAsset;
-    const xhsMedia = url.pathname.match(/^\/media\/xhs\/([a-zA-Z0-9_-]{1,120})\/([a-f0-9]{64}\.(?:png|jpg|webp))$/);
-    if (xhsMedia) {
-      const image = await xhs.getCachedImage(xhsMedia[1], xhsMedia[2]);
-      res.writeHead(200, { 'Content-Type': image.mime, 'Content-Length': image.bytes.length, 'Cache-Control': 'private, no-store' });
-      return res.end(req.method === 'HEAD' ? undefined : image.bytes);
-    }
     const reference = url.pathname.match(/^\/reference-images\/([0-9a-f-]{36})$/);
     if (reference) {
       const [image] = await referenceImages.resolve([reference[1]]);
@@ -1051,8 +1080,6 @@ server.on('error', e => {
   process.exitCode = 1;
 });
 server.on('close', () => { trends.close(); radar.close(); delivery.stop(); closeXhs(); closeDingtalk(); });
-// Playwright installs its own SIGTERM listener after a browser is opened.
-// Explicitly stop HTTP as well, so an idle browser cannot leave the port held.
 const shutdown = () => {
   trends.close(); radar.close(); delivery.stop();
   server.close(); server.closeIdleConnections();

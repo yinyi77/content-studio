@@ -1,4 +1,7 @@
 import { formatImageDimensions, imageSizeOptions, requestedImageSize } from './image-specs.js';
+import { editXhsDraft } from './xhs-draft-editor.js';
+import { openXhsPublishDialog } from './xhs-publish-dialog.js';
+import { createAccountMetrics } from './xhs-account-metrics.js';
 import { projectPlatform, xhsCopyProblem } from './publishing-platform.js';
 import { IMAGE_STYLES, STYLE_CATEGORIES } from './style-catalog.js';
 
@@ -7,6 +10,15 @@ const toastEl = document.querySelector('#toast');
 const lightbox = document.querySelector('#lightbox');
 const GUIDE_STORAGE_KEY = 'content-studio:briefing:v1';
 const EMBEDDED_MODE = new URLSearchParams(location.search).get('embedded')==='1' && window.parent!==window;
+const XHS_ACCOUNT_TABS = {overview:'账号数据',published:'已发布内容',drafts:'草稿箱'};
+function xhsAccountRoute(accountId,tab) {
+  return {accountId:typeof accountId==='string'&&/^[a-zA-Z0-9_-]{1,120}$/.test(accountId)?accountId:'',
+    tab:Object.hasOwn(XHS_ACCOUNT_TABS,tab)?tab:'overview'};
+}
+function readXhsRoute() {
+  const params=new URLSearchParams(location.search);
+  return xhsAccountRoute(params.get('accountId'),params.get('tab'));
+}
 if(EMBEDDED_MODE)document.documentElement.classList.add('legacy-embedded');
 let lastEmbeddedView='';
 let embeddedNavigationVersion=0;
@@ -14,14 +26,6 @@ let embeddedParentNavigationDepth=0;
 const GUIDE_STYLES = IMAGE_STYLES;
 const GUIDE_IMAGE_LIMIT = 4;
 const GUIDE_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
-const XHS_LOCATION_KEY = 'content-studio:xhs-workspace:v1';
-function restoreXhsLocation() {
-  try {
-    const value=JSON.parse(localStorage.getItem(XHS_LOCATION_KEY)||'null');
-    const tabs=Object.fromEntries(Object.entries(value?.tabs||{}).filter(([id,tab])=>/^[A-Za-z0-9_-]{1,120}$/.test(id)&&['analytics','published','drafts'].includes(tab)).slice(-50));
-    return {tabs};
-  } catch {return {tabs:{}};}
-}
 const state = {
   view: ['trends','radar','xhs','dingtalk','history','settings'].includes(new URLSearchParams(location.search).get('view')) ? new URLSearchParams(location.search).get('view') : 'briefing', config: null, projects: [],
   busy: '', search: '', filter: 'all', adminMenuOpen: false,
@@ -29,17 +33,21 @@ const state = {
   settingsTab: 'text', settingsDraft: null, settingsDirty: false, settingsRevision: 0,
   historyLayout: 'table', historyPage: 1, historyPageSize: 12, historySort: 'updated', historyReloading: false,
   models: { text: [], image: [] }, testResults: {}, bootError: '',
-  guide: restoreGuidance(), guideBusy: false, guideEdit: null, guideProject: null, guideActionBusy: '', guidePublishPrompt: false,
+  guide: restoreGuidance(), guideBusy: false, guideEdit: null, guideProject: null, guideActionBusy: '',
   guideStyleCategory: 'all', guideStyleSearch: '', guideHistorySearch: '', guideDeliverySettingsOpen: false,
   guideUploadBusy: false,
   trends: null, trendsError: '', trendsLoading: false, trendsBusy: '', trendsSettingsOpen: false, trendsSourcesOpen: false,
   trendPlatform: 'all', trendSearch: '', trendScope: 'all', trendLimit: 24, trendKeywordsDraft: '', trendKeywordsDirty: false, trendIntervalDraft: null,
   radar: null, radarLoading: false, radarError: '', radarBusy: '', radarFilter: 'pending', radarReferences: [], radarUploadBusy: false,
   radarMaterialReferences: {}, radarSkipDrafts: {}, radarNotificationBusy: '',
-  xhs: null, xhsLoading: false, xhsError: '', xhsBusy: '', xhsProjectId: '', xhsPreview: null,
-  xhsAccountBusy: '', xhsAccountEditor: null, xhsAccountGroup: 'all', xhsAccountSearch: '', xhsAccountStatus: 'all',
-  xhsLocation: restoreXhsLocation(), xhsSection: 'auto', xhsTab: 'analytics',
-  xhsNoteSearch: '', xhsNoteSort: 'recent', xhsNoteLimit: 50, xhsMissingOpen: false, xhsDetail: null,
+  xhsDefault: null, xhsScoped: null,
+  get xhs() {
+    const selected=this.view==='xhs'&&this.xhsRoute.accountId;
+    return selected&&this.xhsScoped?.account?.id===selected?this.xhsScoped:this.xhsDefault;
+  },
+  xhsLoading: false, xhsError: '', xhsBusy: '', xhsProjectId: '', xhsPreview: null,
+  xhsDetail: null, xhsPublished: null,
+  xhsRoute:readXhsRoute(), xhsAccounts:null, xhsAccountsLoading:false, xhsAccountsError:'', xhsFetchedAt:null, xhsAccountSearch:'',
   xhsDraftSearch: '', xhsDraftSort: 'recent', xhsDraftSource: 'official', xhsComposerOpen: false,
   dingtalk: null, dingtalkLoading: false, dingtalkError: '', dingtalkActionError: '', dingtalkBusy: '', dingtalkDraft: null, dingtalkDirty: false, dingtalkTest: null,
 };
@@ -54,6 +62,8 @@ let radarPollTimer;
 let radarLoadVersion = 0;
 let xhsPollTimer;
 let xhsLoadVersion = 0;
+let xhsReadVersion = 0;
+let xhsAccountsVersion = 0;
 let xhsDraftRequestVersion = 0;
 let xhsDetailRequestVersion = 0;
 let xhsDetailReturnFocus = null;
@@ -93,7 +103,7 @@ const buttonBusy = name => state.busy === name ? '<span class="spinner spinner-s
 
 function blankGuidance() {
   return {messages:[],analysis:'',source:'',input:'',error:'',pending:false,clarificationAsked:false,decision:null,
-    matchTrends:true,targetPlatform:'generic',xhsAutoDelivery:false,xhsTargetAccountId:null,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
+    matchTrends:true,targetPlatform:'generic',xhsAutoDelivery:false,trendMatches:null,selectedTrend:null,trendNotice:'',studioSource:'',creation:null,creationError:'',draftImages:[],referenceImages:[],attachmentError:'',
     preferences:{style:null,aspect:null,count:null,mode:null},
     recommendations:{style:'notion',aspect:'3:4',count:5,mode:'cards'},reasons:{}};
 }
@@ -126,7 +136,6 @@ function restoreGuidance() {
     base.matchTrends=data.matchTrends!==false;
     base.xhsAutoDelivery=data.xhsAutoDelivery===true;
     base.targetPlatform=projectPlatform(data);
-    if(typeof data.xhsTargetAccountId==='string'&&(!data.xhsTargetAccountId||/^[A-Za-z0-9_-]{1,120}$/.test(data.xhsTargetAccountId)))base.xhsTargetAccountId=data.xhsTargetAccountId;
     base.trendMatches=normalizeGuideTrendMatches(data.trendMatches);
     if(base.matchTrends&&typeof data.selectedTrend?.id==='string'){
       const selected=base.trendMatches?.matches.find(item=>item.id===data.selectedTrend.id)||null;
@@ -256,7 +265,7 @@ function guidanceView() {
   return `<div class="briefing-layout conversation-layout admin-chat-layout ${resultReady?'is-result':''} ${creating?'has-creation':''} ${!creating&&!g.messages.length?'is-empty':''}">
     ${guideHistoryView()}
     <section class="briefing-panel admin-chat-panel" aria-label="创作需求对话">
-      <div class="admin-chat-toolbar"><div class="admin-chat-current"><strong>${h(p?.title||(g.messages.length?'当前创作对话':'新建创作'))}</strong><span class="admin-chat-state ${locked||state.guideBusy?'is-working':''}">${locked||state.guideBusy?'<span class="spinner spinner-small"></span>':'<i></i>'}${h(state.guideBusy?'正在分析':locked?'正在处理':creating?guideCreationStatus(p||{}):g.decision?.action==='ask'?'等待补充':'就绪')}</span></div><div class="admin-chat-tools"><details id="guide-delivery-settings" class="admin-chat-delivery" ${state.guideDeliverySettingsOpen?'open':''}><summary>${icon('settings')}${guideAutomaticDelivery()?'交付设置 · 自动送稿':'交付设置'}</summary><div id="guide-xhs-region">${guideXhsConnectionView()}</div></details><button type="button" class="button button-secondary admin-chat-mobile-new" data-action="guide-new" ${state.guideBusy||locked?'disabled':''}>${icon('plus')}新建</button></div></div>
+      <div class="admin-chat-toolbar"><div class="admin-chat-current"><strong>${h(p?.title||(g.messages.length?'当前创作对话':'新建创作'))}</strong><span class="admin-chat-state ${locked||state.guideBusy?'is-working':''}">${locked||state.guideBusy?'<span class="spinner spinner-small"></span>':'<i></i>'}${h(state.guideBusy?'正在分析':locked?'正在处理':creating?guideCreationStatus(p||{}):g.decision?.action==='ask'?'等待补充':'就绪')}</span></div><div class="admin-chat-tools"><details id="guide-delivery-settings" class="admin-chat-delivery" ${state.guideDeliverySettingsOpen?'open':''}><summary>${icon('settings')}<span id="guide-delivery-label">${guideDeliverySettingsLabel()}</span></summary><div id="guide-xhs-region">${guideXhsConnectionView()}</div></details><button type="button" class="button button-secondary admin-chat-mobile-new" data-action="guide-new" ${state.guideBusy||locked?'disabled':''}>${icon('plus')}新建</button></div></div>
       <div class="guide-thread" role="log" aria-live="polite">${resultReady ? result : context}${state.guideBusy?'<div class="guide-thinking"><span class="spinner spinner-small"></span>正在分析需求…</div>':''}${g.error?`<div class="guide-error" role="alert"><p>${h(g.error)}</p>${!creating&&g.messages.some(m=>m.role==='user')?`<button class="text-button" data-action="guide-retry" ${state.guideBusy?'disabled':''}>重试这次分析</button>`:''}</div>`:''}${resultReady ? context : result}</div>
       <div class="admin-chat-compose-area">${guideComposerView({creating,locked,p,hint})}<div class="guide-model-note">${creating?'直接描述修改要求，需要重画时才会重新生图。':guideTextReady()?'支持粘贴或拖入图片 · ⌘ / Ctrl + Enter 发送':'先连接文字模型即可开始。'}${!guideTextReady()?` <button class="text-button" data-action="navigate" data-view="settings">去模型设置 ${icon('arrow')}</button>`:''}</div></div>
     </section>
@@ -265,23 +274,26 @@ function guidanceView() {
 
 const GUIDE_DELIVERY_BUSY = new Set(['preparing','queued','running']);
 const guideGenerationActive = project => Boolean(project&&(isActive(project)||['thinking','analyzing','generating'].includes(project.chatStatus)));
+function guideDeliveryProviderChanged(delivery) {
+  return Boolean(delivery?.enabled && state.xhs && (!delivery.providerKey || delivery.providerKey !== state.xhs.providerKey));
+}
 function guideDeliveryActive(project) {
   const delivery=project?.xhsDelivery;
-  return Boolean(delivery?.enabled&&(delivery.running||GUIDE_DELIVERY_BUSY.has(delivery.status)||(delivery.status==='waiting_generation'&&project.status==='completed')));
+  return Boolean(delivery?.enabled&&!guideDeliveryProviderChanged(delivery)&&(delivery.running||GUIDE_DELIVERY_BUSY.has(delivery.status)||(delivery.status==='waiting_generation'&&project.status==='completed')));
 }
 function guideProjectActive(project) { return guideGenerationActive(project)||guideDeliveryActive(project); }
-function guideAutomaticDelivery() {
+function guideDeliverySettingsLabel() {
+  if(xhsDeliveryReadOnly())return '交付设置 · 草稿只读';
   const p=state.guideProject,g=state.guide;
-  return p?Boolean(p.xhsDelivery?.enabled&&p.xhsAutoDelivery!==false):Boolean(g.creation?.capture?.xhsAutoDelivery??g.xhsAutoDelivery);
+  const automatic=p?Boolean(p.xhsDelivery?.enabled&&p.xhsAutoDelivery!==false):Boolean(g.creation?.capture?.xhsAutoDelivery??g.xhsAutoDelivery);
+  return automatic?'交付设置 · 自动送稿':'交付设置';
 }
 function guideXhsConnectionView() {
-  const g=state.guide,p=state.guideProject,delivery=p?.xhsDelivery,targetId=guideTargetAccountId(),record=xhsAccountRecord(targetId)||(!targetId?(xhsAccounts().find(record=>record.profileId===xhsProfileId())||(state.xhs?{profileId:xhsProfileId(),connectionState:state.xhs.connection?.state}:null)):null),targetBound=xhsRecordBound(record),connected=xhsRecordConnected(record),busy=Boolean(state.guideActionBusy||record?.busy||guideDeliveryActive(p));
-  const automatic=guideAutomaticDelivery(),fixed=Boolean(delivery?.accountId||g.creation?.capture?.xhsAutoDelivery),showConnection=automatic||Boolean(delivery?.enabled)||state.guidePublishPrompt;
-  const name=delivery?.accountName||xhsRecordName(record),label=fixed?`本次草稿账号：${name}`:automatic?(targetBound?`完成后自动存至：${name}`:'已开启自动存入小红书草稿'):targetBound?`送稿账号：${name}`:'创作与修改保存在本平台';
-  const message=fixed?'本次目标账号已固定。切换工作台账号不会改变送稿目标。':targetBound&&!connected?'账号已保存，送稿时会检查该账号的登录状态。':automatic?'整组图文完成后送入所选账号的电脑草稿，发布由你决定。':'准备发布时，选择一个账号再送入电脑草稿。';
-  const records=xhsAccounts().filter(record=>xhsRecordBound(record)),fallback=!records.length&&targetBound?[record]:records;
-  const selector=(showConnection||records.length>1)&&!fixed?`<label class="guide-xhs-target" for="guide-xhs-target-account"><span>送稿账号</span><select id="guide-xhs-target-account" ${busy?'disabled':''}><option value="">选择已绑定账号</option>${fallback.map(record=>`<option value="${h(record.accountId)}" ${record.accountId===targetId?'selected':''}>${h(xhsRecordName(record))}${record.group?' · '+h(record.group):''}</option>`).join('')}${targetId&&!fallback.some(record=>record.accountId===targetId)?`<option value="${h(targetId)}" selected disabled>原目标账号已移除，请重新选择</option>`:''}</select><button class="text-button" type="button" data-action="navigate" data-view="xhs">管理账号 ↗</button></label>`:'';
-  return `<div class="guide-xhs-connection ${connected&&automatic?'is-connected':''} ${automatic?'':'is-local'}"><div><span class="guide-xhs-mark">${icon('file')}</span><span><strong>${busy?'<span class="spinner spinner-small"></span>':''}${h(label)}</strong><small>${h(message)}</small></span></div>${selector}${showConnection?`<div class="guide-xhs-connection-actions">${connected?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${busy?'disabled':''}>打开电脑草稿 ${icon('arrow')}</button>`:`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="login" ${busy?'disabled':''}>${targetBound?'重新扫码登录':'连接小红书'} ${icon('arrow')}</button>`}<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="check" ${busy||!record?'disabled':''}>${connected?'检查连接':'我已登录，检查连接'}</button></div>`:''}${!g.creation?`<label class="guide-xhs-auto-option"><input id="guide-xhs-auto-delivery" type="checkbox" ${g.xhsAutoDelivery?'checked':''} ${state.guideBusy||state.guideActionBusy?'disabled':''}><span>生成后自动存入小红书草稿 <small>可选</small></span></label>`:''}</div>`;
+  if(!state.xhs)return `<p class="field-help" role="status">${h(state.xhsError||'正在读取送稿账号…')}</p>`;
+  if(!xhsBound())return '<p class="field-help">'+h(xhsAccountSetupHint())+'</p><button class="text-button" type="button" data-action="navigate" data-view="xhs">查看接入说明</button>';
+  if(!xhsDeliveryReadOnly()&&guideDeliveryProviderChanged(state.guideProject?.xhsDelivery))return '<p class="field-help">本次创作此前使用了其他小红书连接。</p>';
+  const g=state.guide,delivery=state.guideProject?.xhsDelivery,fixed=delivery?.accountId||g.creation?.capture?.xhsAccountId;
+  return `<div class="guide-xhs-connection"><div><span class="guide-xhs-mark">${icon('file')}</span><span><strong>${xhsDeliveryReadOnly()?'草稿账号':'送稿账号'} · ${h(xhsDeliveryReadOnly()?xhsAccountId():fixed||xhsAccountId())}</strong><small>${h(xhsConnectionHint('送稿前会检查发布服务。'))}</small></span></div>${publisherCheckButton()}${!g.creation&&!xhsDeliveryReadOnly()?`<label class="guide-xhs-auto-option"><input id="guide-xhs-auto-delivery" type="checkbox" ${g.xhsAutoDelivery?'checked':''} ${state.guideBusy||state.guideActionBusy?'disabled':''}><span>生成后自动存入小红书草稿 <small>可选</small></span></label>`:''}</div>`;
 }
 function guideEditedAfterDelivery(project) {
   const delivery=project?.xhsDelivery,at=Date.parse(delivery?.verifiedAt||delivery?.updatedAt);
@@ -304,29 +316,37 @@ function guideDeliveryLabel(project) {
   const delivery=project?.xhsDelivery;if(!delivery?.enabled)return '';
   if(delivery.rechecking||guideDeliveryReceipt(project)?.rechecking)return '正在重新核验电脑草稿';
   if(delivery.status==='verified'&&delivery.running)return '电脑草稿已核验，正在保存记录';
-  if(delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery))return '图文已保留，草稿尚未送出，可继续';
+  if(xhsDeliveryReadOnly()&&['waiting_generation','blocked'].includes(delivery.status))return '送稿已暂停';
+  if(delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery))return xhsDeliveryReadOnly()?'图文已保留，草稿尚未送出':'图文已保留，草稿尚未送出，可继续';
   if(guideEditedAfterDelivery(project))return '图文已更新，原草稿保留此前版本';
   return ({waiting_generation:'图文完成后自动存草稿',preparing:'正在准备小红书草稿',queued:'正在等待送入电脑草稿',running:'正在存入并核验电脑草稿',verified:'图文和电脑草稿已完成',filled:'图文已填入，草稿待核验',unknown:'草稿保存结果待核验',failed:'图文已保留，草稿尚未送达',blocked:'图文已保留，草稿等待继续',interrupted:'草稿流程已中断，需人工核验'}[delivery.status])||'草稿状态待确认';
 }
+function projectPublishButton(project,label='选择账号并发布') {
+  return `<button class="button button-secondary" type="button" data-action="xhs-for-project" data-id="${h(project.id)}">${icon('arrow')}${h(label)}</button>`;
+}
 function guideLocalDraftView(project) {
-  const problem=xhsCopyProblem(project.title,project.caption);
-  const ready=xhsEligible(project),busy=guideGenerationActive(project)||Boolean(state.guideActionBusy),targetId=guideTargetAccountId(),record=xhsAccountRecord(targetId),boundAccount=xhsRecordBound(record);
-  return `<section class="guide-xhs-delivery guide-local-draft" aria-label="本平台草稿" aria-busy="${busy}"><div class="guide-delivery-result"><div><strong>${icon('file')}${ready?'图文已保存在本平台':'创作内容保存在本平台'}</strong><p>${h(ready&&problem?problem:projectPlatform(project)==='xhs'?'按小红书篇幅创作，可在需要时送入草稿。':'直接在对话里继续修改，准备发布时再送入小红书草稿。')}</p>${state.guidePublishPrompt&&!boundAccount?'<p class="guide-local-login-hint" role="status">首次送入小红书时，请在上方扫码并确认绑定账号，之后送稿会自动检查保存的登录状态。</p>':boundAccount?`<small>目标账号：${h(xhsRecordName(record))}${xhsRecordConnected(record)?'':' · 送稿时自动检查登录'}</small>`:''}</div>${ready?`<div class="guide-delivery-actions"><button class="button button-secondary" type="button" data-action="guide-xhs-first" data-account-id="${h(boundAccount?targetId:'')}" ${busy||record?.busy||state.xhsAccountBusy?'disabled':''}>${icon('arrow')}${problem?'编辑送稿文案':'送入小红书草稿'}</button></div>`:''}</div></section>`;
+  const ready=xhsEligible(project);
+  return `<section class="guide-xhs-delivery guide-local-draft" aria-label="本平台草稿"><div class="guide-delivery-result"><div><strong>${icon('file')}${ready?'图文已保存在本平台':'创作内容保存在本平台'}</strong><p>${h(xhsDeliveryReadOnly()?xhsDeliverySetupHint():'可继续修改，或选择小红书账号存草稿、预约发布。')}</p></div>${ready?projectPublishButton(project):''}</div></section>`;
+}
+function publisherRecordsLink() {
+  return `<button class="text-button" type="button" data-action="guide-publisher-records">查看送稿记录 ${icon('arrow')}</button>`;
 }
 function guideDeliveryView(project) {
   const delivery=project?.xhsDelivery;if(!delivery?.enabled)return guideLocalDraftView(project);
+  if(guideDeliveryProviderChanged(delivery))return `<section class="guide-xhs-delivery" aria-label="原连接送稿记录"><div class="guide-delivery-result"><div><strong>原连接送稿记录</strong><p>${h(delivery.message||'这次送稿使用了其他小红书连接。')}</p></div>${xhsEligible(project)?projectPublishButton(project,'选择现在的账号送稿'):''}</div></section>`;
   const imagesReady=project.status==='completed'&&(project.pages||[]).length>0&&(project.pages||[]).every(page=>page.status==='done'&&page.imageUrl),busy=guideDeliveryActive(project),receipt=guideDeliveryReceipt(project),edited=guideEditedAfterDelivery(project);
   const warning=['blocked','failed','filled','unknown','interrupted'].includes(delivery.status),verified=delivery.status==='verified';
-  const planningDone=Boolean(project.pages?.length),target=xhsAccountRecord(delivery.accountId||guideTargetAccountId()),accountMatch=xhsRecordBound(target),targetWorking=Boolean(target?.busy||state.xhsAccountBusy||state.xhsBusy);
+  const planningDone=Boolean(project.pages?.length),target=xhsAccountRecord(delivery.accountId||guideTargetAccountId()),accountMatch=xhsRecordBound(target),targetWorking=Boolean(target?.busy||state.xhsBusy);
   const stages=[['策划内容',planningDone,'analyzing'],['生成完整图文',imagesReady,'generating'],['存入小红书草稿',verified,'delivery']];
-  const canContinue=imagesReady&&guideDeliveryMayContinue(delivery)&&xhsRecordBound(target)&&accountMatch&&!busy&&!targetWorking&&!state.guideActionBusy;
+  const mayContinue=!xhsDeliveryReadOnly()&&imagesReady&&guideDeliveryMayContinue(delivery);
+  const canContinue=mayContinue&&xhsRecordBound(target)&&accountMatch&&!busy&&!targetWorking&&!state.guideActionBusy;
   const canSend=xhsRecordBound(target)&&accountMatch&&!busy&&!targetWorking&&!guideGenerationActive(project)&&!state.guideActionBusy;
-  const canOpen=xhsRecordConnected(target)&&accountMatch&&!busy&&!targetWorking&&!guideGenerationActive(project)&&!state.guideActionBusy;
-  const canRecheck=Boolean(delivery.draftId&&xhsCanRecheck(receipt)),canSaveVersion=edited&&imagesReady&&delivery.canSaveVersion!==false&&!delivery.pendingVersion;
-  const problem=(canSaveVersion||imagesReady&&guideDeliveryMayContinue(delivery))&&xhsCopyProblem(project.title,project.caption);
-  const hint=problem|| (edited?'当前修改还未送入小红书。直接说“把修改版存到草稿箱”，或在这里另存新版；此前草稿保留。':delivery.message||(!imagesReady?'全部图片完成后，会自动送入本次绑定账号的电脑草稿。':busy?'正在后台送稿，刷新页面不会重复上传。':verified?'已保存至电脑草稿，发布由你在小红书决定。':'图文和图片已经保留，请按提示继续处理。'));
+  const canOpen=accountMatch&&!busy&&!targetWorking&&!guideGenerationActive(project)&&!state.guideActionBusy;
+  const canRecheck=Boolean(delivery.draftId&&xhsCanRecheck(receipt)),canSaveVersion=!xhsDeliveryReadOnly()&&edited&&imagesReady&&delivery.canSaveVersion!==false&&!delivery.pendingVersion;
+  const problem=(canSaveVersion||mayContinue)&&draftCopyProblem(project.title,project.caption);
+  const hint=xhsDeliveryReadOnly()?xhsDeliverySetupHint():problem|| (edited?'当前修改还未送入小红书。直接说“把修改版存到草稿箱”，或在这里另存新版；此前草稿保留。':delivery.message||(!imagesReady?'全部图片完成后，会自动送入本次服务账号的草稿。':busy?'正在后台送稿，刷新页面不会重复上传。':verified?'已存入该账号的草稿箱，可在这里预约发布。':'图文和图片已经保留，请按提示继续处理。'));
   const continueLabel=delivery.accountId?'继续送入草稿':`继续送至 ${xhsRecordName(target)} 草稿`;
-  return `<section class="guide-xhs-delivery ${warning?'is-warning':verified?'is-verified':''}" aria-label="创作与草稿交付进度" aria-busy="${busy}"><ol class="guide-delivery-steps">${stages.map(([label,done,kind],index)=>{const current=!done&&(kind==='delivery'?imagesReady:(kind==='generating'?planningDone:!planningDone));return `<li class="${done?'is-done':current?'is-current':''}"><span>${done?icon('check'):index+1}</span><strong>${label}</strong></li>`;}).join('')}</ol><div class="guide-delivery-result"><div><strong>${busy?'<span class="spinner spinner-small"></span>':icon(verified?'check':warning?'alert':'file')}${h(guideDeliveryLabel(project))}</strong><p>${h(hint)}</p>${delivery.accountId?`<small>目标账号：${h(delivery.accountName||delivery.accountId)}${Number(delivery.version)>1?` · 第 ${Number(delivery.version)} 版`:''}</small>`:''}${delivery.accountId&&!accountMatch?'<small class="guide-delivery-account-mismatch">原目标账号已移除，请先重新绑定该账号，平台不会改投。</small>':''}</div><div class="guide-delivery-actions">${problem?'<button class="button button-secondary" type="button" data-action="guide-edit-xhs-copy">编辑送稿文案</button>':''}${!problem&&imagesReady&&guideDeliveryMayContinue(delivery)?`<button class="button button-secondary" type="button" data-action="guide-xhs-continue" ${canContinue?'':'disabled'}>${icon('arrow')}${h(continueLabel)}</button>${!xhsRecordBound(target)?'<span>首次使用请先在上方扫码绑定账号。</span>':!xhsRecordConnected(target)?'<span>已绑定账号，送稿时会自动检查登录。</span>':''}`:''}${canRecheck?`<button class="button button-secondary" type="button" data-action="guide-xhs-recheck" data-id="${h(delivery.draftId)}" ${canOpen?'':'disabled'}>${icon('refresh')}重新核验草稿</button>`:''}${canSaveVersion&&!problem?`<button class="button button-secondary" type="button" data-action="guide-xhs-version" ${canSend?'':'disabled'}>${icon('arrow')}将当前版本另存草稿</button>`:''}${['verified','filled','unknown','interrupted'].includes(delivery.status)?`<button class="text-button" type="button" data-action="guide-xhs-action" data-kind="open-drafts" ${canOpen?'':'disabled'}>${verified?'打开电脑草稿':'打开官方窗口核对'} ${icon('arrow')}</button>`:''}</div></div>${delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery)?'<p class="guide-delivery-note">上次在送稿前中断，图文已保留。点击继续后才会送入电脑草稿。</p>':['unknown','filled','interrupted'].includes(delivery.status)?`<p class="guide-delivery-note">${canRecheck?'重新核验只读取已有草稿，不会再次上传。若尚未保存，请先在官方窗口保存后再核验。':'请在小红书官方窗口核对，本平台不会自动重复提交这份草稿。'}</p>`:''}${guideDeliveryHistoryView(delivery)}</section>`;
+  return `<section class="guide-xhs-delivery ${warning?'is-warning':verified?'is-verified':''}" aria-label="创作与草稿交付进度" aria-busy="${busy}"><ol class="guide-delivery-steps">${stages.map(([label,done,kind],index)=>{const current=!done&&(kind==='delivery'?imagesReady:(kind==='generating'?planningDone:!planningDone));return `<li class="${done?'is-done':current?'is-current':''}"><span>${done?icon('check'):index+1}</span><strong>${label}</strong></li>`;}).join('')}</ol><div class="guide-delivery-result"><div><strong>${busy?'<span class="spinner spinner-small"></span>':icon(verified?'check':warning?'alert':'file')}${h(guideDeliveryLabel(project))}</strong><p>${h(hint)}</p>${delivery.accountId?`<small>目标账号：${h(delivery.accountName||delivery.accountId)}${Number(delivery.version)>1?` · 第 ${Number(delivery.version)} 版`:''}</small>`:''}${delivery.accountId&&!accountMatch?'<small class="guide-delivery-account-mismatch">本次送稿的目标账号与当前服务账号不一致。</small>':''}</div><div class="guide-delivery-actions">${problem?'<button class="button button-secondary" type="button" data-action="guide-edit-xhs-copy">编辑送稿文案</button>':''}${!problem&&mayContinue?`<button class="button button-secondary" type="button" data-action="guide-xhs-continue" ${canContinue?'':'disabled'}>${icon('arrow')}${h(continueLabel)}</button>${!xhsRecordBound(target)?`<span>${h(xhsAccountSetupHint())}</span>`:!xhsRecordConnected(target)?`<span>${xhsAvailabilityHint}</span>`:''}`:''}${canRecheck?`<button class="button button-secondary" type="button" data-action="guide-xhs-recheck" data-id="${h(delivery.draftId)}" ${canOpen?'':'disabled'}>${icon('refresh')}查询任务结果</button>`:''}${canSaveVersion&&!problem?`<button class="button button-secondary" type="button" data-action="guide-xhs-version" ${canSend?'':'disabled'}>${icon('arrow')}将当前版本另存草稿</button>`:''}${delivery.draftId?publisherRecordsLink():''}${imagesReady&&!busy?projectPublishButton(project):''}</div></div>${delivery.status==='interrupted'&&mayContinue?'<p class="guide-delivery-note">上次在送稿前中断，图文已保留。点击继续后才会送入电脑草稿。</p>':['unknown','filled','interrupted'].includes(delivery.status)?`<p class="guide-delivery-note">在送稿记录中查询原任务。结果待确认时请在发布服务核对。</p>`:''}${guideDeliveryHistoryView(delivery)}</section>`;
 }
 function guideCompletionNotice(project) {
   const latest=project.chatRequests?.at(-1);
@@ -336,57 +356,40 @@ function guideCompletionNotice(project) {
   const delivery=project?.xhsDelivery;
   if(delivery?.enabled){
     if(delivery.status==='verified')return {message:guideEditedAfterDelivery(project)?'本次图文修改已完成，原小红书草稿仍保留此前版本。':'图文已完成，并已存入小红书电脑草稿。',warning:false};
+    if(xhsDeliveryReadOnly()&&['failed','blocked','interrupted'].includes(delivery.status))return {message:xhsDeliverySetupHint(),warning:true};
     if(delivery.status==='interrupted'&&guideDeliveryMayContinue(delivery))return {message:'图文已保留，草稿尚未送出，可在当前对话继续送稿。',warning:true};
-    if(['filled','unknown','interrupted'].includes(delivery.status))return {message:xhsCanRecheck(guideDeliveryReceipt(project))?'图文已保留，可在当前对话重新核验电脑草稿。':'图文已保留，草稿保存结果需要在小红书窗口核验。',warning:true};
+    if(['filled','unknown','interrupted'].includes(delivery.status))return {message:'图文已保留，请查看发布服务的送稿记录。',warning:true};
     if(['failed','blocked'].includes(delivery.status)&&project.status==='completed')return {message:delivery.message||'图文已完成，草稿还未送达，可在当前对话继续处理。',warning:true};
   }
   return {message:project.status==='completed'?'图文已完成，可以直接在对话里查看和修改。':project.error||'这次处理已结束，结果已保存在对话中。',warning:['error','partial','interrupted'].includes(project.status)||['error','interrupted'].includes(project.chatStatus)};
 }
 function updateGuideXhs() {
   if(state.view!=='briefing')return;
+  const label=document.querySelector('#guide-delivery-label');if(label)label.textContent=guideDeliverySettingsLabel();
   const region=document.querySelector('#guide-xhs-region');if(region)region.innerHTML=guideXhsConnectionView();
   const delivery=document.querySelector('.guide-xhs-delivery');if(delivery&&state.guideProject)delivery.outerHTML=guideDeliveryView(state.guideProject);
 }
 async function continueGuideXhsDelivery() {
+  if(xhsDeliveryReadOnly())return notify(xhsDeliverySetupHint(),true);
   const p=state.guideProject,delivery=p?.xhsDelivery;
   if(!p||!guideDeliveryMayContinue(delivery)||guideGenerationActive(p)||guideDeliveryActive(p)||state.guideActionBusy)return;
-  const target=xhsAccountRecord(delivery.accountId||guideTargetAccountId());if(!xhsRecordBound(target))return notify('请先在账号管理中绑定本次目标账号。',true);
+  const target=xhsAccountRecord(delivery.accountId||guideTargetAccountId());if(!xhsRecordBound(target))return notify(xhsAccountSetupHint(),true);
   const version=guideCreationVersion,id=p.id,accountId=target.accountId;state.guideActionBusy='xhs-delivery';renderGuidance({preserve:true});
   try{const result=await api(`/api/projects/${encodeURIComponent(id)}/xhs-delivery`,{method:'POST',body:{accountId}});if(version!==guideCreationVersion||state.guide.creation?.projectId!==id)return;if(result.project)setGuideProject(result.project);else await loadGuideProject({quiet:true});}
   catch(error){if(version===guideCreationVersion){state.guide.creation.error=error.message;saveGuidance();notify(error.message,true);if(error.status===409)await loadXhs({quiet:true});}}
   finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();}}
 }
 async function saveGuideXhsVersion() {
+  if(xhsDeliveryReadOnly())return notify(xhsDeliverySetupHint(),true);
   const p=state.guideProject,delivery=p?.xhsDelivery;
   if(!p||!guideEditedAfterDelivery(p)||delivery.canSaveVersion===false||delivery.pendingVersion||!xhsEligible(p)||guideWorkActive()||xhsWorking())return;
-  const target=xhsAccountRecord(delivery.accountId);if(!xhsRecordBound(target))return notify('原草稿目标账号尚未绑定，请在账号管理中重新绑定。',true);
+  const target=xhsAccountRecord(delivery.accountId);if(!xhsRecordBound(target))return notify('原草稿的账号与当前发布服务账号不一致。',true);
   const version=guideCreationVersion,id=p.id,accountId=delivery.accountId;state.guideActionBusy='xhs-version';renderGuidance({preserve:true});
   try{
     const result=await api(`/api/projects/${encodeURIComponent(id)}/xhs-delivery`,{method:'POST',body:{accountId,newVersion:true}});
     if(version!==guideCreationVersion||state.guide.creation?.projectId!==id)return;
     if(result.project)setGuideProject(result.project);else await loadGuideProject({quiet:true});
     notify('正在准备当前版本的电脑草稿，此前草稿保留。');
-  }catch(error){if(version===guideCreationVersion){notify(error.message,true);if(error.status===409){await loadXhs({quiet:true});await loadGuideProject({quiet:true});}}}
-  finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();}}
-}
-async function saveGuideFirstXhsDraft(shownAccountId) {
-  const p=state.guideProject;
-  if(!p||p.xhsDelivery?.enabled||!xhsEligible(p)||guideWorkActive()||xhsWorking())return;
-  if(xhsCopyProblem(p.title,p.caption))return openXhsForProject(p.id,guideTargetAccountId());
-  state.guidePublishPrompt=true;
-  if(!xhsRecordBound(xhsAccountRecord(guideTargetAccountId()))){
-    state.guideDeliverySettingsOpen=true;
-    renderGuidance({preserve:true});
-    document.querySelector('#guide-xhs-region')?.scrollIntoView({behavior:'smooth',block:'nearest'});
-    return notify('图文已经保存在本平台。首次送稿请在上方扫码并确认绑定账号。');
-  }
-  if(!shownAccountId||shownAccountId!==guideTargetAccountId()){renderGuidance({preserve:true});return notify('小红书账号已变化，请核对当前显示的目标账号后再送稿。',true);}
-  const version=guideCreationVersion,id=p.id,accountId=shownAccountId;state.guideActionBusy='xhs-first';renderGuidance({preserve:true});
-  try{
-    const result=await api(`/api/projects/${encodeURIComponent(id)}/xhs-delivery`,{method:'POST',body:{accountId,newVersion:true}});
-    if(version!==guideCreationVersion||state.guide.creation?.projectId!==id)return;
-    if(result.project)setGuideProject(result.project);else await loadGuideProject({quiet:true});
-    notify('正在将当前图文送入电脑草稿，结果会在本对话中显示。');
   }catch(error){if(version===guideCreationVersion){notify(error.message,true);if(error.status===409){await loadXhs({quiet:true});await loadGuideProject({quiet:true});}}}
   finally{if(version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();}}
 }
@@ -454,7 +457,7 @@ function guideCreationView(resultReady) {
   const downloads=done&&!guideGenerationActive(p)?`<a class="button button-primary" href="/api/projects/${encodeURIComponent(p.id)}/export.zip" download>${icon('download')}下载整组</a>`:'';
   const retryActions=`${canRetry?`<button class="button button-secondary" data-action="guide-retry-images">${icon('refresh')}${pages.length?'重试未完成图片':'重试这次创作'}</button>`:''}${c.error&&!active?'<button class="text-button" data-action="guide-load-result">重新读取结果</button>':''}${last&&last.status==='unknown'&&!active?'<button class="text-button" data-action="guide-chat-retry">确认上次修改结果</button>':''}`;
   const gallery = pages.length?`<div class="guide-creation-grid" data-count="${pages.length}">${pages.map((page,index)=>`<article class="guide-created-page"><div class="guide-created-image" data-aspect="${h(p.aspect)}">${page.imageUrl?`<button data-action="guide-result-preview" data-id="${h(page.id)}" aria-label="查看第 ${index+1} 张完整图片"><img src="${h(page.imageUrl)}" alt="${h(page.title||'第 '+(index+1)+' 张图文')}" loading="lazy"><span>${icon('expand')}查看大图</span></button>`:`<div class="guide-created-placeholder">${page.status==='generating'?'<span class="spinner"></span>':icon('image')}<strong>第 ${index+1} 张</strong><span>${page.status==='error'?'这张图片暂未完成':page.status==='generating'?'正在绘制…':'等待生成'}</span></div>`}</div><div class="guide-created-page-footer"><span>${String(index+1).padStart(2,'0')} · ${h(page.title)}</span>${page.imageUrl?`<a href="${h(page.imageUrl)}" download="${h(p.id)}-${index+1}.${h(page.imageUrl.split('.').pop())}" aria-label="下载第 ${index+1} 张图片">${icon('download')}</a>`:''}</div>${page.imageUrl ? outputSizeView(page,p.aspect) : ''}${page.error?`<p class="guide-created-error">${h(page.error)}</p>`:''}</article>`).join('')}</div>`:'';
-  const copyActions = `<div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}${!resultReady&&xhsEligible(p)&&p.xhsDelivery?.enabled?`<button class="button button-secondary" data-action="guide-xhs-action" data-kind="open-drafts" ${!xhsRecordConnected(xhsAccountRecord(p.xhsDelivery.accountId))||xhsAccountRecord(p.xhsDelivery.accountId)?.busy||Boolean(state.xhsAccountBusy)||guideDeliveryActive(p)?'disabled':''}>${icon('arrow')}打开电脑草稿</button>`:''}</div>`;
+  const copyActions = `<div class="guide-post-actions guide-creation-actions"><button class="button button-secondary" data-action="guide-copy-result">${icon('copy')}复制文案</button>${downloads}</div>`;
   const copy = p.caption || p.title
     ? `<section class="guide-creation-copy" aria-label="帖子正文"><div class="guide-post-caption"><h4 class="sr-label">帖子正文</h4><p>${h(p.caption || '')}</p></div>${resultReady ? '' : copyActions}</section>`
     : downloads && !resultReady ? `<div class="guide-creation-actions">${downloads}</div>` : '';
@@ -467,7 +470,7 @@ function guideCreationView(resultReady) {
        ${error}${gallery}${delivery}${progress}${copy}${review}`
     : `<div class="guide-creation-header"><div><span class="eyebrow">图文作品</span><h3>${h(p.title || '这次的图文作品')}</h3></div>${statusLabel}</div>
        ${review}${delivery}${progress}${error}${gallery}${copy}`;
-  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}">${content}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p>${message.editXhsCopy&&xhsEligible(p)&&xhsCopyProblem(p.title,p.caption)?'<button type="button" class="text-button" data-action="guide-edit-xhs-copy">编辑送稿文案</button>':''}</article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
+  return `<section class="guide-creation" aria-label="创作结果" aria-busy="${active}">${content}${retryActions?`<div class="guide-creation-actions guide-retry-actions">${retryActions}</div>`:''}${canRetry?`<p class="guide-creation-note">${pages.length?'重试只处理未完成的图片，可能产生模型费用。':'重试会重新策划并生成图片，可能产生模型费用。'}</p>`:''}${chat.length||pending?`<div class="guide-project-chat" aria-label="作品修改对话">${chat.map(message=>`<article class="guide-project-message ${message.role==='user'?'user':'assistant'}"><span>${message.role==='user'?'你':'创意编辑'}</span>${guideImageMessageView(message.images||message.referenceImages)}<p>${h(message.content||'')}</p>${message.editXhsCopy&&xhsEligible(p)&&draftCopyProblem(p.title,p.caption)?'<button type="button" class="text-button" data-action="guide-edit-xhs-copy">编辑送稿文案</button>':''}</article>`).join('')}${pending?`<article class="guide-project-message user pending"><span>你 · 请求待确认</span>${guideImageMessageView(last.images)}<p>${h(last.message)}</p></article>`:''}</div>`:''}</section>`;
 }
 
 function setGuideProject(project) {
@@ -508,8 +511,9 @@ async function startGuideCreation({command='',retryRequest=false}={}) {
   if(g.selectedTrend&&!guideTrendUsable(g.selectedTrend)){g.selectedTrend=null;g.trendNotice='已选热梗已过 14 天留存期，已移除。请重新选择，或按原主题生成。';saveGuidance();renderGuidance();return notify(g.trendNotice,true);}
   if(!state.config?.configured){g.creationError='需求已整理好。请在模型设置中配置文字和图片模型，回来后告诉我“继续创作”即可。';saveGuidance();renderGuidance();return;}
   const source=guideSourceWithTrend(g);if(source.length>24000)return notify('完整素材加上热点信息超过 24000 字，请精简素材后再生成。原素材会保留。',true);
-  if(g.xhsAutoDelivery&&!xhsRecordBound(xhsAccountRecord(guideTargetAccountId()))){g.creationError='请先选择一个已绑定的小红书账号，再开始自动送稿创作。';saveGuidance();renderGuidance();return;}
-  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString(),capture:{targetPlatform:g.targetPlatform,xhsAutoDelivery:g.xhsAutoDelivery===true,...(g.xhsAutoDelivery?{xhsAccountId:guideTargetAccountId()||null}:{})}};
+  const autoDelivery=g.xhsAutoDelivery===true&&!xhsDeliveryReadOnly();
+  if(autoDelivery&&!xhsRecordBound(xhsAccountRecord(guideTargetAccountId()))){g.creationError=xhsAccountSetupHint();saveGuidance();renderGuidance();return;}
+  const c=g.creation||{requestId:crypto.randomUUID(),projectId:null,status:'submitting',error:'',requestedAt:new Date().toISOString(),capture:{targetPlatform:g.targetPlatform,xhsAutoDelivery:autoDelivery,...(autoDelivery?{xhsAccountId:guideTargetAccountId()||null}:{})}};
   if(command&&!retryRequest){g.messages.push({role:'user',content:command});g.messages=trimGuideMessages(g.messages);g.input='';}
   g.creation=c;g.creationError='';c.error='';state.guideActionBusy='create';const version=++guideCreationVersion;saveGuidance();renderGuidance({focusCreation:true});
   try{const {project}=await api('/api/brief/create',{method:'POST',body:{requestId:c.requestId,source,style:g.preferences.style,aspect:g.preferences.aspect,count:g.preferences.count,mode:g.preferences.mode||'cards',referenceIds:g.referenceImages.map(image=>image.id),targetPlatform:projectPlatform(c.capture||g),xhsAutoDelivery:c.capture?.xhsAutoDelivery===true,...(c.capture?.xhsAutoDelivery===true?{xhsAccountId:c.capture.xhsAccountId}: {})}});if(version!==guideCreationVersion||state.guide!==g)return;setGuideProject(project);}
@@ -544,7 +548,7 @@ function resetGuideConversation({confirmExisting=true}={}) {
   if(state.guideBusy||guideWorkActive()){state.view='briefing';renderGuidance({preserve:true});notify('这次创作正在处理中，完成后再开启新创作。');return false;}
   const g=state.guide;
   if(confirmExisting&&(g.messages.length||g.input.trim()||g.draftImages.length||g.creation)&&!confirm(g.creation&&!g.creation.projectId?'上次生成请求的结果还未确认，旧任务可能仍在处理。开启新创作后再次生成将是新的请求。确认开启？当前对话会清空，已有作品保留。':'开启新的创作对话？当前未发送的文字和图片会清空，已有作品会保留在作品记录中。'))return false;
-  ++guideRequestVersion;++guideCreationVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);state.guide=blankGuidance();state.guideProject=null;state.guideEdit=null;state.guideActionBusy='';state.guidePublishPrompt=false;resetGuideStyleFilters();state.view='briefing';saveGuidance();renderGuidance();loadXhs({quiet:true});return true;
+  ++guideRequestVersion;++guideCreationVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);state.guide=blankGuidance();state.guideProject=null;state.guideEdit=null;state.guideActionBusy='';resetGuideStyleFilters();state.view='briefing';saveGuidance();renderGuidance();loadXhs({quiet:true});return true;
 }
 async function resumeProjectInGuide(id) {
   if(state.guide.creation?.projectId===id){state.view='briefing';renderGuidance({preserve:true});await loadGuideProject({quiet:true});return;}
@@ -553,7 +557,7 @@ async function resumeProjectInGuide(id) {
   const {project}=await api(`/api/projects/${encodeURIComponent(id)}`);
   ++guideCreationVersion;++guideRequestVersion;++guideProjectPollVersion;clearTimeout(guideProjectPollTimer);
   const g=blankGuidance();g.source=project.source||'';g.analysis='已载入作品，直接告诉我想改哪里即可。';g.preferences=guidePreferences(project);g.recommendations={...g.recommendations,...g.preferences};g.creation={projectId:project.id,requestId:isGuideUuid(project.creationRequestId)?project.creationRequestId:crypto.randomUUID(),status:project.status,error:'',requestedAt:project.createdAt};
-  state.guide=g;state.guideProject=null;state.guideEdit=null;state.guidePublishPrompt=false;state.view='briefing';setGuideProject(project);renderGuidance({focusCreation:true});beginGuidePolling();await loadXhs({quiet:true});
+  state.guide=g;state.guideProject=null;state.guideEdit=null;state.view='briefing';setGuideProject(project);renderGuidance({focusCreation:true});beginGuidePolling();await loadXhs({quiet:true});
 }
 
 function guideTrendUrl(value) {
@@ -784,7 +788,7 @@ const ADMIN_PAGES = {
   briefing:{title:'创作对话',group:'内容创作',description:'提交需求、补充信息，生成并修改图文内容。',icon:'file'},
   radar:{title:'选题雷达',group:'内容创作',description:'管理产品资料、定时选题与待审核提案。',icon:'search'},
   trends:{title:'当下热点',group:'内容创作',description:'查看平台热榜、热梗与关注词，筛选可用选题。',icon:'chart'},
-  xhs:{title:'小红书账号',group:'账号与内容',description:'管理账号数据、已发布笔记和电脑草稿。',icon:'grid'},
+  xhs:{title:'账号管理',group:'账号与内容',description:'查看小红书账号、内容表现和草稿。',icon:'grid'},
   history:{title:'作品记录',group:'账号与内容',description:'查找作品，查看生成状态并继续编辑。',icon:'history'},
   dingtalk:{title:'钉钉接入',group:'系统管理',description:'配置机器人凭证、消息范围与连接状态。',icon:'bolt'},
   settings:{title:'模型设置',group:'系统管理',description:'配置文本与图片模型的 API 地址、密钥和模型。',icon:'settings'},
@@ -829,19 +833,26 @@ function toggleAdminMenu(open=!state.adminMenuOpen) {
   if(state.adminMenuOpen)document.querySelector('.main-nav .nav-item.active')?.focus({preventScroll:true});
   else toggle?.focus({preventScroll:true});
 }
-async function navigateAdminPage(view) {
+async function navigateAdminPage(view,xhsRoute) {
   if(!Object.hasOwn(ADMIN_PAGES,view))return;
   if(state.adminMenuOpen)toggleAdminMenu(false);
-  if(view==='xhs'&&state.view!=='xhs')state.xhsSection='overview';
   if(view!=='trends')state.trendsSettingsOpen=false;
+  const prev=state.view;
+  if(prev==='xhs'&&view!=='xhs'){state.xhsPublished=null;resetXhsAccountActivity();}
   state.view=view;const url=new URL(location.href);
+  if(view==='xhs')applyXhsRoute(xhsRoute||xhsAccountRoute('','overview'));
+  if(view==='xhs'&&state.xhsRoute.accountId){
+    url.searchParams.set('accountId',state.xhsRoute.accountId);url.searchParams.set('tab',state.xhsRoute.tab);
+  }else{url.searchParams.delete('accountId');url.searchParams.delete('tab');}
   if(view==='briefing')url.searchParams.delete('view');else url.searchParams.set('view',view);
-  window.history.replaceState({},'',url);render();
+  if(!EMBEDDED_MODE&&!embeddedParentNavigationDepth&&prev!==view&&view==='xhs')window.history.pushState({},'',url);
+  else window.history.replaceState({},'',url);
+  render();
   if(view==='history')await refreshHistory();
   if(view==='trends')await loadTrends();
   if(view==='radar')await loadRadar();
   if(view==='dingtalk')await loadDingtalk({quiet:Boolean(state.dingtalk)});
-  if(view==='xhs')await loadXhs({refreshProjects:true});
+  if(view==='xhs')await loadXhsWorkspace();
   if(view==='briefing')await loadXhs({quiet:true});
 }
 async function closeAdminTab(view) {
@@ -867,13 +878,16 @@ function postEmbeddedMessage(message) {
 function notifyEmbeddedView() {
   if(!EMBEDDED_MODE||lastEmbeddedView===state.view)return;
   const first=!lastEmbeddedView;lastEmbeddedView=state.view;
+  if(!first&&embeddedParentNavigationDepth===0&&state.view==='xhs'&&state.xhsRoute.accountId){
+    postEmbeddedMessage({type:'content-studio:xhs-route',view:'xhs',...state.xhsRoute});return;
+  }
   if(first||embeddedParentNavigationDepth===0)postEmbeddedMessage({type:first?'content-studio:ready':'content-studio:navigate',view:state.view});
 }
 // Suppress only the synchronous render caused by a parent route request.
 // User navigation during the subsequent GET remains observable by the shell.
-function navigateFromEmbeddedParent(view) {
+function navigateFromEmbeddedParent(view,route) {
   embeddedParentNavigationDepth++;
-  try{return navigateAdminPage(view);}finally{embeddedParentNavigationDepth--;}
+  try{return navigateAdminPage(view,route);}finally{embeddedParentNavigationDepth--;}
 }
 function embeddedRequestId(value) {
   if(typeof value==='string')return {requestId:value.slice(0,120)};
@@ -881,7 +895,7 @@ function embeddedRequestId(value) {
 }
 async function refreshEmbeddedView(view) {
   if(view!==state.view)return;
-  if(view==='xhs')return loadXhs({quiet:true,refreshProjects:true});
+  if(view==='xhs')return loadXhsWorkspace();
   if(view==='dingtalk')return loadDingtalk({quiet:true});
   if(view==='trends')return loadTrends({quiet:true});
   if(view==='radar')return loadRadar({quiet:true});
@@ -903,8 +917,10 @@ window.addEventListener('message',async event=>{
   if(state.guideUploadBusy||state.radarUploadBusy){postEmbeddedMessage({type:'content-studio:navigate',view:state.view});postEmbeddedMessage({type:'content-studio:view-ready',view:state.view,...requestId,rejected:true});return;}
   const version=++embeddedNavigationVersion;
   try{
+    const route=data.view==='xhs'?xhsAccountRoute(data.accountId,data.tab):null;
+    if(route&&state.view==='xhs')setXhsRoute(route,false);
     if(data.type==='content-studio:refresh-view')await refreshEmbeddedView(data.view);
-    else if(state.view!==data.view)await navigateFromEmbeddedParent(data.view);
+    else if(state.view!==data.view)await navigateFromEmbeddedParent(data.view,route);
     if(version===embeddedNavigationVersion)postEmbeddedMessage({type:'content-studio:view-ready',view:state.view,...requestId});
   }catch(error){if(version===embeddedNavigationVersion){notify(error.message,true);postEmbeddedMessage({type:'content-studio:view-ready',view:state.view,...requestId});}}
 });
@@ -1013,219 +1029,242 @@ async function retryDingtalkDelivery(id) {
   finally{state.dingtalkBusy='';updateDingtalk();await loadDingtalk({quiet:true});}
 }
 const XHS_DRAFT_LABELS = {queued:'等待处理',running:'正在准备电脑草稿',filled:'已填入发布页，待核验',verified:'电脑草稿已核验',unknown:'保存结果待核验',failed:'草稿准备未完成',interrupted:'上次操作已中断'};
-const XHS_CONNECTION_LABELS = {disconnected:'尚未连接',connecting:'正在打开登录',connected:'账号已连接',login_required:'等待本人登录',needs_attention:'需要本人处理',browser_unavailable:'浏览器暂不可用'};
-const xhsConnected = () => state.xhs?.connection?.state==='connected'&&Boolean(state.xhs?.account?.id);
-// Binding remembers the approved account; only connected confirms this session.
-const xhsBound = () => /^[A-Za-z0-9_-]{1,120}$/.test(String(state.xhs?.account?.id||''))&&['connected','needs_attention','login_required','browser_unavailable','disconnected'].includes(state.xhs?.connection?.state);
-const xhsServerWorking = () => Boolean(state.xhs?.status?.busy||state.xhs?.sync?.running||state.xhs?.officialDraftSync?.running||state.xhs?.contentStatus?.running);
-const xhsWorking = () => Boolean(state.xhsBusy||state.xhsAccountBusy||xhsServerWorking());
+const xhsConnected = () => state.xhs?.connection?.state==='connected'&&Boolean(xhsAccountId());
+const xhsDeliveryReadOnly = () => state.xhs?.configured===true&&state.xhs.deliveryConfiguration?.configured===false;
+const xhsDeliverySetupHint = () => state.xhs?.deliveryConfiguration?.message||'请在工作台配置内网临时图源或已有图片站点，重启后检查服务。';
+function xhsConnectionHint(fallback) {
+  const message=state.xhs?.connection?.message||fallback;
+  if(!xhsDeliveryReadOnly())return message;
+  const hint=xhsDeliverySetupHint();
+  return message.includes(hint)?message:message+' '+hint;
+}
+const xhsBound = () => state.xhs?.configured!==false&&Boolean(xhsAccountId());
+const xhsServerWorking = () => Boolean(state.xhs?.status?.busy||state.xhs?.officialDraftSync?.running);
+const xhsWorking = () => Boolean(state.xhsBusy||xhsServerWorking());
 const xhsDate = value => value&&Number.isFinite(new Date(value).getTime())?new Date(value).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'尚未同步';
-const xhsValue = value => typeof value==='number'&&Number.isFinite(value)?value.toLocaleString('zh-CN'):'未获取';
 const xhsEligible = project => project?.status==='completed'&&!isActive(project)&&Array.isArray(project.pages)&&project.pages.length>0&&project.pages.every(page=>page.status==='done'&&typeof page.imageUrl==='string'&&page.imageUrl.startsWith('/media/'));
-const xhsHref = value => {try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&(u.hostname==='xiaohongshu.com'||u.hostname.endsWith('.xiaohongshu.com'))?u.href:'';}catch{return '';}};
 const xhsAccountId = () => String(state.xhs?.account?.id||'');
-const xhsProfileId = () => String(state.xhs?.selectedProfileId||'');
-const xhsAccounts = () => Array.isArray(state.xhs?.accounts)?state.xhs.accounts:[];
 function xhsAccountRecord(accountId) {
-  if(!accountId)return null;
-  const record=xhsAccounts().find(record=>record.accountId===accountId);
-  if(record)return record;
-  return accountId===xhsAccountId()?{profileId:xhsProfileId(),accountId,nickname:state.xhs?.account?.nickname,connectionState:state.xhs?.connection?.state,busy:xhsServerWorking()}:null;
+  if(!accountId||accountId!==xhsAccountId()||!xhsBound())return null;
+  return {accountId,nickname:state.xhs.account.nickname||accountId,connectionState:state.xhs.connection.state,busy:xhsServerWorking()};
 }
-const xhsRecordBound = record => Boolean(record?.accountId&&!record.duplicateOf);
+const xhsRecordBound = record => Boolean(record?.accountId);
 const xhsRecordConnected = record => xhsRecordBound(record)&&record.connectionState==='connected';
-const xhsRecordName = record => record?.accountName||record?.nickname||'尚未登录的账号';
-const guideTargetAccountId = () => String(state.guideProject?.xhsDelivery?.accountId||state.guide.creation?.capture?.xhsAccountId||(typeof state.guide.xhsTargetAccountId==='string'?state.guide.xhsTargetAccountId:xhsAccountId())||'');
-const xhsDisplayName = record => record?.nickname||record?.accountName||'待登录账号';
-function xhsAvatarUrl(record) {
-  if(!record?.accountId||record.duplicateOf)return '';
-  const selected=record.profileId===xhsProfileId()&&record.accountId===xhsAccountId();
-  const value=record.avatarUrl||(selected?state.xhs?.account?.avatar:'');
-  if(typeof value!=='string'||!value||value.length>8192)return '';
-  try {
-    const url=new URL(value,location.origin);
-    if(url.origin===location.origin)return url.pathname.startsWith(`/media/xhs/${record.accountId}/`)&&!url.search&&!url.hash?url.pathname:'';
-    return url.protocol==='https:'&&!url.username&&!url.password&&!url.port&&['xhscdn.com','xiaohongshu.com'].some(host=>url.hostname===host||url.hostname.endsWith('.'+host))?url.href:'';
-  } catch {return '';}
-}
-function xhsAvatarView(record,name=xhsDisplayName(record)) {
-  const source=xhsAvatarUrl(record);
-  return `<span class="xhs-table-avatar xhs-account-avatar-frame" aria-hidden="true"><span class="xhs-avatar-initial">${h(Array.from(name)[0]||'账')}</span>${source?`<img class="xhs-avatar-image" data-xhs-avatar src="${h(source)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:''}</span>`;
-}
+const xhsRecordName = record => record?.nickname||'服务账号';
+const guideTargetAccountId = () => String(state.guideProject?.xhsDelivery?.accountId||state.guide.creation?.capture?.xhsAccountId||xhsAccountId());
+const xhsAvailabilityHint = '送稿时自动检查服务';
+const xhsAccountSetupHint = () => state.xhs?.configured===false&&state.xhs.connection?.message||'请在工作台配置小红书发布服务，再使用送稿。';
+const draftCopyProblem = (title,content) => xhsCopyProblem(title,content)||(!title?.trim()||!content?.trim()?'送稿需要帖子标题和正文。':'');
 function replaceXhsRegion(selector,html) {
   const target=document.querySelector(selector);
   if(target&&target._xhsHtml!==html){target.innerHTML=html;target._xhsHtml=html;}
 }
-function rememberXhsLocation() {
-  if(!['overview','detail'].includes(state.xhsSection))return;
-  if(xhsProfileId())state.xhsLocation.tabs[xhsProfileId()]=state.xhsTab;
-  try{localStorage.setItem(XHS_LOCATION_KEY,JSON.stringify({tabs:Object.fromEntries(Object.entries(state.xhsLocation.tabs).slice(-50))}));}catch{}
-}
-function xhsRecordStatus(record) {
-  return record.busy?'正在处理':record.duplicateOf?'重复绑定，需处理':!record.accountId?'待扫码登录':record.connectionState==='connected'?'已连接':'需检查登录';
-}
-function xhsRecordSummary(record,key) {
-  if(record.duplicateOf)return null;
-  const value=record.summary?.[key]??(record.profileId===xhsProfileId()&&record.accountId===xhsAccountId()?state.xhs?.account?.[key]:null);
-  return typeof value==='number'&&Number.isFinite(value)&&value>=0?value:null;
-}
-function xhsAccountsResultsView() {
-  const accounts=xhsAccounts(),search=state.xhsAccountSearch.trim().toLocaleLowerCase();
-  const shown=accounts.filter(record=>(state.xhsAccountGroup==='all'||(record.group||'默认分组')===state.xhsAccountGroup)&&(!search||[record.nickname,record.accountName,record.group].some(value=>String(value||'').toLocaleLowerCase().includes(search)))&&(state.xhsAccountStatus==='all'||(state.xhsAccountStatus==='connected'?xhsRecordConnected(record):!xhsRecordConnected(record))));
-  if(!accounts.length)return `<div class="xhs-overview-empty">${icon('cards')}<h3>添加第一个小红书账号</h3><p>扫码登录后，在这里查看账号数据、已发布笔记和电脑草稿。</p><button class="button button-primary" type="button" data-action="xhs-account-add">${icon('plus')}添加账号</button><small>在小红书官方窗口登录，无需填写密码或 Cookie。</small></div>`;
-  if(!shown.length)return `<div class="xhs-overview-empty">${icon('search')}<h3>没有匹配的账号</h3><p>试试其他昵称、备注或分组。</p><button class="button button-secondary" type="button" data-action="xhs-clear-filters">清空筛选</button></div>`;
-  return `<p class="xhs-table-scroll-hint">左右滑动，查看完整数据与操作</p><div class="xhs-accounts-table-wrap"><table class="xhs-accounts-table"><caption class="sr-label">小红书账号表现与连接状态</caption><thead><tr><th scope="col">账号</th><th scope="col">分组</th><th scope="col">连接状态</th><th scope="col">粉丝</th><th scope="col">获赞与收藏</th><th scope="col">笔记</th><th scope="col">数据更新时间</th><th scope="col">操作</th></tr></thead><tbody>${shown.map(record=>`<tr><td><button class="xhs-table-identity" type="button" data-action="xhs-account-select" data-profile-id="${h(record.profileId)}" aria-label="查看账号：${h(xhsDisplayName(record))}" ${state.xhsAccountBusy?'disabled':''}>${xhsAvatarView(record)}<span><strong>${h(xhsDisplayName(record))}</strong><small>${h(record.accountName&&record.accountName!==xhsDisplayName(record)?record.accountName:record.accountId?'小红书号已绑定':'等待扫码绑定')}</small></span></button></td><td>${h(record.group||'默认分组')}</td><td><span class="xhs-table-status ${xhsRecordConnected(record)?'is-connected':'is-attention'}"><i></i>${h(xhsRecordStatus(record))}</span></td>${['followers','likes','notesCount'].map(key=>`<td class="xhs-numeric">${h(xhsValue(xhsRecordSummary(record,key)))}</td>`).join('')}<td class="xhs-table-time">${h(xhsDate(record.lastSyncAt))}</td><td><div class="xhs-row-actions"><button class="text-button" type="button" data-action="xhs-account-select" data-profile-id="${h(record.profileId)}" ${state.xhsAccountBusy?'disabled':''}>查看详情</button><button class="text-button" type="button" data-action="xhs-account-select" data-profile-id="${h(record.profileId)}" data-tab="drafts" ${state.xhsAccountBusy?'disabled':''}>草稿箱</button></div></td></tr>`).join('')}</tbody></table></div><p class="xhs-list-footnote">${shown.length===accounts.length?'共 '+accounts.length+' 个账号':'显示 '+shown.length+' / '+accounts.length+' 个账号'} · 数据来自各账号最近一次同步，未获取的指标保留标记。</p>`;
-}
-function xhsAccountsView() {
-  const accounts=xhsAccounts(),groups=[...new Set(accounts.map(record=>record.group||'默认分组'))];
-  return `<div class="xhs-overview"><section class="panel xhs-overview-surface"><div class="xhs-overview-heading"><div><h2>账号列表 <small>${accounts.length}</small></h2><p>查看各账号表现，进入账号管理笔记与草稿。</p></div>${accounts.length?`<button class="button button-primary" type="button" data-action="xhs-account-add" ${state.xhsAccountBusy?'disabled':''}>${icon('plus')}添加账号</button>`:''}</div>${accounts.length?`<div class="xhs-overview-toolbar"><label class="xhs-filter-search" for="xhs-account-search">${icon('search')}<span class="sr-label">搜索账号</span><input id="xhs-account-search" type="search" placeholder="搜索昵称、备注或分组" value="${h(state.xhsAccountSearch)}"></label><label class="sr-label" for="xhs-account-group-filter">账号分组</label><select id="xhs-account-group-filter"><option value="all">全部分组</option>${groups.map(group=>`<option value="${h(group)}" ${state.xhsAccountGroup===group?'selected':''}>${h(group)}</option>`).join('')}</select><label class="sr-label" for="xhs-account-status-filter">连接状态</label><select id="xhs-account-status-filter"><option value="all">全部状态</option><option value="connected" ${state.xhsAccountStatus==='connected'?'selected':''}>已连接</option><option value="attention" ${state.xhsAccountStatus==='attention'?'selected':''}>需处理</option></select><button type="button" class="button button-secondary" data-action="xhs-reload" ${state.xhsLoading||state.xhsAccountBusy?'disabled':''}>${icon('refresh')}刷新列表</button></div>`:''}<div id="xhs-overview-results">${xhsAccountsResultsView()}</div></section></div>`;
-}
-function openXhsAccountEditor(profileId='') {
-  if(state.xhsAccountBusy)return;
-  const record=xhsAccounts().find(record=>record.profileId===profileId);
-  state.xhsAccountEditor={profileId:record?.profileId||'',accountName:record?.accountName||'',group:record?.group||'',error:'',pending:false};
-  renderXhsAccountEditor();document.querySelector('#xhs-account-dialog')?.showModal();document.querySelector('#xhs-account-name')?.focus();
-}
-function closeXhsAccountEditor() {
-  if(state.xhsAccountEditor?.pending)return;
-  state.xhsAccountEditor=null;document.querySelector('#xhs-account-dialog')?.close();
-}
-function renderXhsAccountEditor() {
-  const draft=state.xhsAccountEditor,region=document.querySelector('#xhs-account-editor-region');if(!draft||!region)return;
-  region.innerHTML=`<form id="xhs-account-form"><div class="xhs-account-editor-heading"><div><span class="eyebrow">YOUR ACCOUNT DETAILS</span><h2 id="xhs-account-editor-title">${draft.profileId?'编辑账号备注':'添加小红书账号'}</h2></div><button class="icon-button" type="button" data-action="xhs-account-editor-close" aria-label="关闭账号设置" ${draft.pending?'disabled':''}>${icon('close')}</button></div><label class="field-label" for="xhs-account-name">账号备注 <small>选填</small></label><input id="xhs-account-name" maxlength="80" value="${h(draft.accountName)}" placeholder="例如：产品主号、工具分享号" autocomplete="off" ${draft.pending?'disabled':''}><label class="field-label" for="xhs-account-group">账号分组 <small>选填</small></label><input id="xhs-account-group" maxlength="80" value="${h(draft.group)}" placeholder="例如：工具作品" autocomplete="off" ${draft.pending?'disabled':''}><p class="field-help">${draft.profileId?'修改备注和分组会保留当前登录与草稿。':'添加后，点击账号页的「扫码登录」完成绑定，无需填写密码、手机号或 Cookie。'}</p>${draft.error?`<p class="xhs-account-editor-error" role="alert">${h(draft.error)}</p>`:''}<div class="xhs-account-editor-actions"><button class="button button-secondary" type="button" data-action="xhs-account-editor-close" ${draft.pending?'disabled':''}>取消</button><button class="button button-primary" type="submit" ${draft.pending?'disabled':''}>${draft.pending?'<span class="spinner spinner-small"></span>':icon(draft.profileId?'check':'plus')}${draft.profileId?'保存备注':'添加账号'}</button></div></form>`;
-}
-async function saveXhsAccountEditor() {
-  const draft=state.xhsAccountEditor;if(!draft||draft.pending||state.xhsAccountBusy)return;
-  const body={accountName:draft.accountName.trim(),group:draft.group.trim()},version=++xhsLoadVersion;
-  draft.pending=true;state.xhsAccountBusy='save';renderXhsAccountEditor();
-  try{
-    const snapshot=await api('/api/xhs/accounts'+(draft.profileId?'/'+encodeURIComponent(draft.profileId):''),{method:draft.profileId?'PATCH':'POST',body});
-    if(version===xhsLoadVersion){acceptXhs(snapshot);if(!draft.profileId){state.xhsSection='detail';rememberXhsLocation();}}
-    draft.pending=false;if(state.xhsAccountEditor===draft)closeXhsAccountEditor();
-    notify(draft.profileId?'账号备注已保存。':'账号已添加，点击「扫码登录」完成绑定。');
-  }catch(error){if(state.xhsAccountEditor===draft){draft.error=error.message;draft.pending=false;renderXhsAccountEditor();}else notify(error.message,true);}
-  finally{state.xhsAccountBusy='';updateXhs();scheduleXhsPoll();}
-}
-async function selectXhsAccount(profileId,{tab}={}) {
-  if(!profileId||state.xhsAccountBusy||!xhsAccounts().some(record=>record.profileId===profileId))return;
-  if(profileId===xhsProfileId()){
-    state.xhsSection='detail';if(['analytics','published','drafts'].includes(tab))state.xhsTab=tab;
-    rememberXhsLocation();updateXhs();return;
-  }
-  const version=++xhsLoadVersion;++xhsDraftRequestVersion;clearTimeout(xhsPollTimer);closeXhsDetail({restoreFocus:false});
-  state.xhsAccountBusy='select';state.xhsError='';updateXhs();
-  try{const snapshot=await api(`/api/xhs/accounts/${encodeURIComponent(profileId)}/select`,{method:'POST',body:{}});if(version===xhsLoadVersion){acceptXhs(snapshot);state.xhsSection='detail';if(['analytics','published','drafts'].includes(tab))state.xhsTab=tab;rememberXhsLocation();}}
-  catch(error){if(version===xhsLoadVersion){state.xhsError=error.message;notify(error.message,true);}}
-  finally{state.xhsAccountBusy='';state.xhsBusy='';updateXhs();scheduleXhsPoll();}
-}
-async function removeXhsAccount(profileId) {
-  const record=xhsAccounts().find(record=>record.profileId===profileId);if(!record||state.xhsAccountBusy||record.busy)return;
-  if(!confirm(`从平台移除「${xhsRecordName(record)}」？\n这会关闭该账号的专用浏览器。浏览器中的原草稿、已有作品和本机存储会保留，不会退出或删除小红书账号。\n如果官网还有未保存的编辑，请先取消并保存。`))return;
-  const version=++xhsLoadVersion;state.xhsAccountBusy='remove';updateXhs();
-  try{const snapshot=await api(`/api/xhs/accounts/${encodeURIComponent(profileId)}`,{method:'DELETE'});if(version===xhsLoadVersion)acceptXhs(snapshot);notify('已从平台移除账号，原稿和本机存储已保留。');}
-  catch(error){if(version===xhsLoadVersion){state.xhsError=error.message;notify(error.message,true);}}
-  finally{state.xhsAccountBusy='';updateXhs();scheduleXhsPoll();}
-}
-
 function xhsCanRecheck(draft) {
-  return Boolean(draft&&draft.canRecheck!==false&&(draft.canRecheck===true||['filled','unknown'].includes(draft.status))&&!draft.rechecking&&!['queued','running'].includes(draft.status));
-}
-function xhsTabsView() {
-  const notes=(state.xhs.notes||[]).filter(note=>!note.accountId||note.accountId===xhsAccountId()).length;
-  const drafts=(state.xhs.officialDrafts||[]).filter(draft=>!draft.accountId||draft.accountId===xhsAccountId()).length;
-  return [['analytics','数据概览',null],['published','已发布',notes],['drafts','电脑草稿',drafts]].map(([id,label,count])=>`<button type="button" id="xhs-tab-${id}" role="tab" aria-selected="${state.xhsTab===id}" aria-controls="xhs-panel-${id}" tabindex="${state.xhsTab===id?0:-1}" data-action="xhs-tab" data-tab="${id}">${label}${count!==null?`<span class="xhs-tab-count">${count}</span>`:''}</button>`).join('');
+  return Boolean(draft?.canRecheck&&!draft.rechecking&&!['queued','running'].includes(draft.status));
 }
 function xhsDraftSourceView() {
-  return [['official','官方电脑草稿'],['submissions','平台送稿记录']].map(([source,label])=>`<button class="${state.xhsDraftSource===source?'is-active':''}" type="button" data-action="xhs-draft-source" data-source="${source}" aria-pressed="${state.xhsDraftSource===source}">${label}</button>`).join('');
+  return [['official','服务草稿'],['submissions','平台送稿记录']].map(([source,label])=>`<button class="${state.xhsDraftSource===source?'is-active':''}" type="button" data-action="xhs-draft-source" data-source="${source}" aria-pressed="${state.xhsDraftSource===source}">${label}</button>`).join('');
 }
 function xhsDraftRefreshView() {
-  return state.xhsDraftSource==='official'?`<button class="button button-secondary" type="button" data-action="xhs-action" data-kind="open-drafts" ${xhsWorking()||!xhsConnected()?'disabled':''}>打开小红书草稿 ${icon('arrow')}</button><button class="button button-primary" type="button" data-action="xhs-official-sync" ${xhsWorking()||!xhsConnected()?'disabled':''}>${icon('refresh')}刷新草稿</button>`:`<button class="button button-secondary" type="button" data-action="xhs-reload" ${state.xhsAccountBusy?'disabled':''}>${icon('refresh')}刷新记录</button>`;
+  return state.xhsDraftSource==='official'?`<button class="button button-secondary" type="button" data-action="xhs-official-sync" ${xhsWorking()?'disabled':''}>${icon('refresh')}读取服务草稿</button>`:`<button class="button button-secondary" type="button" data-action="xhs-reload" ${state.xhsLoading?'disabled':''}>${icon('refresh')}刷新记录</button>`;
 }
-function xhsDetailWorkspaceView() {
-  const busy=xhsWorking()||!xhsConnected();
-  return `<div class="xhs-account-detail">
-    <div id="xhs-account-region">${xhsAccountView()}</div>
-    <div class="xhs-tabs" role="tablist" aria-label="账号工作台页签">${xhsTabsView()}</div>
-    <section id="xhs-panel-analytics" role="tabpanel" aria-labelledby="xhs-tab-analytics" ${state.xhsTab==='analytics'?'':'hidden'}>
-      <section class="panel xhs-metrics-panel"><div class="xhs-section-heading"><div><h2>账号表现</h2><span id="xhs-sync-time">数据更新 ${h(xhsDate(state.xhs.sync?.lastSyncAt))}</span></div><button class="button button-primary" type="button" data-action="xhs-action" data-kind="sync" ${busy?'disabled':''}>${icon('refresh')}刷新数据</button></div><div id="xhs-metrics-region">${xhsMetricsView()}</div></section>
-    </section>
-    <section id="xhs-panel-published" role="tabpanel" aria-labelledby="xhs-tab-published" ${state.xhsTab==='published'?'':'hidden'}>
-      <section class="panel xhs-notes-panel"><div class="xhs-section-heading"><div><h2>已发布笔记</h2><span id="xhs-notes-count">${(state.xhs.notes||[]).filter(note=>!note.accountId||note.accountId===xhsAccountId()).length} 篇已读取</span></div></div>
-        <div class="xhs-note-toolbar"><label class="xhs-note-search" for="xhs-note-search">${icon('search')}<span class="sr-label">搜索已发布笔记标题</span><input id="xhs-note-search" type="search" placeholder="搜索笔记标题" value="${h(state.xhsNoteSearch)}"></label><label for="xhs-note-sort" class="sr-label">笔记排序</label><select id="xhs-note-sort">${[['recent','发布时间 · 最新'],['views','阅读 · 最多'],['likes','点赞 · 最多'],['collects','收藏 · 最多'],['comments','评论 · 最多']].map(([value,label])=>`<option value="${value}" ${state.xhsNoteSort===value?'selected':''}>${label}</option>`).join('')}</select><label for="xhs-note-limit" class="sr-label">列表同步数量</label><select id="xhs-note-limit">${[50,100,150,200].map(n=>`<option value="${n}" ${state.xhsNoteLimit===n?'selected':''}>最近 ${n} 篇</option>`).join('')}</select><button class="button button-primary" type="button" data-action="xhs-action" data-kind="sync" ${busy?'disabled':''}>${icon('refresh')}刷新列表</button></div>
-        <div id="xhs-notes-region">${xhsNotesView()}</div><p id="xhs-notes-coverage" class="xhs-data-note">${h(xhsNotesCoverage())}</p>
-      </section>
-    </section>
-    <section id="xhs-panel-drafts" role="tabpanel" aria-labelledby="xhs-tab-drafts" ${state.xhsTab==='drafts'?'':'hidden'}>
-      <section class="panel xhs-official-panel"><div class="xhs-section-heading"><div><h2>电脑草稿</h2></div><div id="xhs-draft-refresh" class="xhs-row-actions">${xhsDraftRefreshView()}</div></div>
+function xhsDraftPanel() {
+  return `    <section id="xhs-panel-drafts" aria-label="发布服务草稿">
+      <section class="panel xhs-official-panel"><div class="xhs-section-heading"><div><h2>草稿箱</h2></div><div id="xhs-draft-refresh" class="xhs-row-actions">${xhsDraftRefreshView()}</div></div>
         <div class="xhs-draft-toolbar"><div class="xhs-draft-source" role="group" aria-label="草稿来源">${xhsDraftSourceView()}</div><label class="xhs-filter-search" for="xhs-draft-search">${icon('search')}<span class="sr-label">搜索草稿标题</span><input id="xhs-draft-search" type="search" placeholder="搜索草稿标题" value="${h(state.xhsDraftSearch)}"></label><label for="xhs-draft-sort" class="sr-label">草稿排序</label><select id="xhs-draft-sort"><option value="recent" ${state.xhsDraftSort==='recent'?'selected':''}>保存时间 · 最新</option><option value="oldest" ${state.xhsDraftSort==='oldest'?'selected':''}>保存时间 · 最早</option><option value="title" ${state.xhsDraftSort==='title'?'selected':''}>标题排序</option></select></div>
-        <div id="xhs-official-drafts-region" ${state.xhsDraftSource==='official'?'':'hidden'}>${xhsOfficialDraftsView()}</div>
+        <div id="xhs-official-drafts-region" ${state.xhsDraftSource==='official'?'':'hidden'}>${publisherDraftsView()}</div>
         <div id="xhs-submissions-region" ${state.xhsDraftSource==='submissions'?'':'hidden'}><p class="xhs-data-note">这里记录平台送出的版本及核验结果，小红书后续修改不会回写此记录。</p><div id="xhs-drafts-region" aria-live="polite">${xhsDraftsView()}</div></div>
       </section>
-      <details id="xhs-composer-disclosure" class="xhs-composer-disclosure" ${state.xhsComposerOpen?'open':''}><summary>${icon('plus')}从作品送入草稿</summary><div id="xhs-composer-region">${xhsComposerView()}</div></details>
+      ${xhsDeliveryReadOnly()?'':`<details id="xhs-composer-disclosure" class="xhs-composer-disclosure" ${state.xhsComposerOpen?'open':''}><summary>${icon('plus')}从作品送入草稿</summary><div id="xhs-composer-region">${xhsComposerView()}</div></details>`}
     </section>
-    <p class="xhs-page-note">${icon('lock')}数据按账号分别保存。电脑草稿不包含手机本地草稿。</p>
-  </div>`;
+    <p class="xhs-page-note">${icon('lock')}草稿箱收录此发布服务创建的草稿。</p>`;
+}
+const xhsSelectedAccount = () => state.xhsAccounts?.find(row=>row.accountId===state.xhsRoute.accountId);
+const xhsDeliveryAccountOpen = () => Boolean(xhsSelectedAccount()&&state.xhsRoute.accountId===xhsAccountId());
+function xhsScreenKey() {
+  const r=state.xhsRoute;
+  return JSON.stringify([r.accountId,r.tab,state.xhs?.providerKey,xhsAccountId(),xhsDeliveryReadOnly(),xhsSelectedAccount()||null]);
+}
+function xhsTaskStatus(row) {
+  let label='状态未知',style='';
+  if(row.enabled===false){label='已停用';style='is-attention';}
+  else if(row.paused===true){label='已暂停';style='is-attention';}
+  else if(row.executing===true){label='执行中';style='is-connected';}
+  else if(row.queuedJobs>0){label='等待执行';}
+  else if(row.executing===false){label='未在执行';}
+  else if(row.paused===false){label='未暂停';}
+  const details=[];
+  if(row.executing===true&&(row.paused===true||row.enabled===false))details.push('有任务执行中');
+  if(row.queuedJobs>0)details.push('排队 '+row.queuedJobs);
+  if(row.needsAttention>0)details.push('待核对 '+row.needsAttention);
+  return `<span class="xhs-table-status ${style}"><i></i>${label}</span>${details.length?`<small class="xhs-task-counts">${details.map(text=>`<span>${h(text)}</span>`).join('')}</small>`:''}`;
+}
+const XHS_ACCOUNT_METRICS = [
+  ['followers','粉丝数'], ['following','关注数'], ['likesAndSaves','获赞与收藏'], ['notes','笔记数'],
+];
+const xhsAccountLabel = row => row.nickname || '用户名未提供';
+const xhsPlatformLabel = row => row.platformAccountId ? '平台账号 ID · '+row.platformAccountId : '服务编号 · '+row.accountId;
+function xhsAccountMonogram(row) {
+  const initial=Array.from(row.nickname||'')[0];
+  return `<span class="xhs-table-avatar xhs-account-avatar-frame" aria-hidden="true">${initial?h(initial):icon('cards')}</span>`;
+}
+function xhsLoginView(row) {
+  const states={verified:'已核验',unverified:'未核验',expired:'登录已失效',logged_out:'已退出'};
+  const label=Object.hasOwn(states,row.loginStatus)?states[row.loginStatus]:'状态未知';
+  const style=row.loginStatus==='verified'?' is-connected':['expired','logged_out'].includes(row.loginStatus)?' is-attention':'';
+  return `<span class="xhs-table-status${style}"><i></i>${label}</span>${row.identityCheckedAt?`<small class="xhs-identity-checked">核验于 ${h(xhsDate(row.identityCheckedAt))}</small>`:''}`;
+}
+function xhsAccountMetric(row,key) {
+  const value=row.metrics?.[key];
+  return Number.isFinite(value)&&value>=0 ? h(row.metricLabels?.[key]||value.toLocaleString('zh-CN')) : null;
+}
+function xhsMetricFootnote(rows) {
+  if(rows.some(row=>row.metricsReadFailed))return '部分账号的指标缓存读取失败，可在账号详情重新读取。';
+  return rows.some(row=>XHS_ACCOUNT_METRICS.some(([key])=>xhsAccountMetric(row,key)===null))
+    ? '— 表示微服务尚未提供该项数据。' : '';
+}
+function xhsAccountsTableView() {
+  const records=state.xhsAccounts;
+  if(state.xhs?.configured===false)return `<div class="xhs-overview-empty"><h3>配置小红书发布服务</h3><p>${h(xhsAccountSetupHint())}</p><p>在工作台目录复制 <code>.env.example</code> 为 <code>.env.xhs-publisher</code>，填写服务地址、服务令牌和账号 ID 后重启工作台。</p></div>`;
+  if(state.xhsAccountsError)return `<div class="xhs-overview-empty" role="alert">${icon('alert')}<h3>账号列表读取失败</h3><p>${h(state.xhsAccountsError)}</p><button type="button" class="button button-secondary" data-action="xhs-accounts-refresh">重试</button></div>`;
+  if(!records)return '<div class="xhs-overview-empty" role="status"><span class="spinner spinner-small"></span> 正在读取服务账号…</div>';
+  if(!records.length)return '<div class="xhs-overview-empty"><h3>暂无已配置账号</h3><p>在小红书发布服务配置账号后，刷新列表即可查看。</p></div>';
+  const search=state.xhsAccountSearch.trim().toLowerCase();
+  const rows=records.filter(row=>[row.nickname,row.platformAccountId,row.accountId].some(value=>value?.toLowerCase().includes(search))).map(row=>{
+    const id=h(row.accountId);
+    const cells=XHS_ACCOUNT_METRICS.map(([key,label])=>{
+      const count=xhsAccountMetric(row,key);
+      return `<td class="xhs-account-count" data-label="${label}">${count??'<span aria-label="未提供">—</span>'}</td>`;
+    }).join('');
+    return `<tr><td><button type="button" class="xhs-table-identity" data-action="xhs-account-open" data-id="${id}">${xhsAccountMonogram(row)}<span><strong>${h(xhsAccountLabel(row))}</strong><small>${h(xhsPlatformLabel(row))}</small></span></button></td>
+      ${cells}<td data-label="登录状态">${xhsLoginView(row)}</td><td data-label="任务状态">${xhsTaskStatus(row)}</td>
+      <td><button type="button" class="text-button" data-action="xhs-account-open" data-id="${id}" aria-label="查看 ${h(row.nickname||row.accountId)} 的账号详情">查看详情 ${icon('arrow')}</button></td></tr>`;
+  }).join('');
+  const headings=['小红书用户名',...XHS_ACCOUNT_METRICS.map(([,label])=>label),'登录状态','任务状态','操作'];
+  return rows?`<div class="xhs-accounts-table-wrap"><table class="xhs-accounts-table"><thead><tr>${headings.map(label=>`<th scope="col">${label}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="xhs-overview-empty">没有匹配的账号。</div>';
+}
+function xhsAccountsListView() {
+  const records=state.xhsAccounts;
+  return `<section class="panel xhs-overview"><div class="xhs-overview-heading"><div><h2>账号列表${records&&!state.xhsAccountsError?`<small>${records.length}</small>`:''}</h2></div>
+    <div class="xhs-row-actions">${xhsBound()?publisherCheckButton():''}<button class="button button-secondary" type="button" data-action="xhs-accounts-refresh" ${state.xhsAccountsLoading?'disabled':''}>${icon('refresh')}刷新列表</button></div></div>
+    ${records?.length>1||state.xhsAccountSearch?`<div class="xhs-overview-toolbar"><label class="xhs-filter-search">${icon('search')}<span class="sr-label">搜索账号</span><input id="xhs-account-search" type="search" placeholder="搜索用户名或账号 ID" value="${h(state.xhsAccountSearch)}"></label></div>`:''}
+    <div id="xhs-accounts-table-region">${xhsAccountsTableView()}</div>
+    ${state.xhsFetchedAt&&!state.xhsAccountsError?`<p class="xhs-list-footnote">${xhsMetricFootnote(records||[])} 最近读取 ${h(xhsDate(state.xhsFetchedAt))}</p>`:''}</section>`;
+}
+function xhsAccountView() {
+  const row=xhsSelectedAccount();if(!row)return '';
+  return `<div class="xhs-workspace-toolbar"><div class="xhs-context-main"><button class="text-button xhs-back-link" type="button" data-action="xhs-account-list">${icon('arrow')}账号列表</button><span class="xhs-context-divider" aria-hidden="true"></span><div class="xhs-current-account">${xhsAccountMonogram(row)}<div><h2>${h(xhsAccountLabel(row))}</h2><small>${h(xhsPlatformLabel(row))}</small></div></div></div>
+    <div class="xhs-context-actions"><div>${xhsLoginView(row)}</div>${xhsDeliveryAccountOpen()?publisherCheckButton():''}</div></div>`;
+}
+function xhsRuntimePanel(row) {
+  const flag=(value,yes,no)=>typeof value==='boolean'?(value?yes:no):null;
+  const fields=[
+    ['账号启用',flag(row.enabled,'已启用','已停用')],['任务暂停',flag(row.paused,'已暂停','未暂停')],
+    ['正在执行',flag(row.executing,'是','否')],['排队任务',row.queuedJobs],['待人工核对',row.needsAttention],
+    ['预约发布',flag(row.publishEnabled,'已开启','已关闭')],['每日限额',row.dailyLimit],
+  ];
+  const entries=fields.map(([label,value])=>`<div><dt>${label}</dt><dd>${value==null?'<span aria-label="未提供">—</span>':h(value)}</dd></div>`).join('');
+  return `<section class="panel" aria-label="任务与配置"><div class="xhs-section-heading"><h2>任务与配置</h2><button type="button" class="button button-secondary" data-action="xhs-accounts-refresh" ${state.xhsAccountsLoading?'disabled':''}>${icon('refresh')}刷新状态</button></div><dl class="xhs-runtime-fields">${entries}</dl></section>`;
+}
+function xhsMetricsPanel(row) {
+  const metrics=XHS_ACCOUNT_METRICS.map(([key,label])=>{
+    const count=xhsAccountMetric(row,key);
+    return `<div><span>${label}</span><strong${count===null?' class="is-missing" aria-label="未提供"':''}>${count??'—'}</strong></div>`;
+  }).join('');
+  const note=xhsMetricFootnote([row]);
+  return `<section class="panel"><div class="xhs-section-heading"><h2>账号指标</h2></div><div class="xhs-basic-metrics">${metrics}</div>${note?`<p class="xhs-list-footnote">${note}</p>`:''}</section>`+accountMetricsView.panel(row);
+}
+
+const accountMetricsView=createAccountMetrics({
+  api, escape:h, redraw:updateXhs, formatDate:xhsDate,
+  providerKey:()=>state.xhsDefault?.providerKey||'',
+  updateTotals(id,data) {
+    const row=state.xhsAccounts?.find(item=>item.accountId===id);
+    if(!row)return;
+    if(data.sync)row.metricsSync=data.sync;
+    row.metricsReadFailed=false;
+    for(const [key,source] of [['following','following'],['followers','followers'],['likesAndSaves','likes_and_favorites']]){
+      (row.metrics||={})[key]=data.totals?.[source]?.value??null;
+      (row.metricLabels||={})[key]=data.totals?.[source]?.raw??null;
+    }
+  },
+});
+const noteSyncs = new Map();
+let noteSyncTimer;
+const notesPending = status => status === 'queued' || status === 'running';
+function notesTask(accountId) {
+  const key = 'xhs-notes-sync:' + (state.xhsDefault?.providerKey || '') + ':' + accountId;
+  if (!noteSyncs.has(key)) {
+    let requestId = null;
+    try { requestId = sessionStorage.getItem(key); } catch {}
+    noteSyncs.set(key, { key, requestId, job: null, busy: false, error: '' });
+  }
+  return noteSyncs.get(key);
+}
+function rememberNotesRequest(task, id) {
+  task.requestId = id;
+  try { if (id) sessionStorage.setItem(task.key,id); else sessionStorage.removeItem(task.key); } catch {}
+}
+function xhsPublishedPanel() {
+  const page=state.xhsPublished, loading=!page||page.loading===true, data=page?.data;
+  const row=xhsSelectedAccount(), task=notesTask(row.accountId), sync=task.job || data?.sync;
+  const pending=notesPending(sync?.status), checking=Boolean(task.error && pending);
+  const remoteAction=checking?'查询同步进度':task.requestId?'重试本次同步':'同步小红书笔记';
+  const actions=`<div class="xhs-draft-actions"><button type="button" class="button button-secondary" data-action="xhs-notes-page" data-kind="refresh" data-offset="${page?.offset??0}" ${loading?'disabled':''}>${icon('refresh')}${page?.error?'重试':'刷新列表'}</button><button type="button" class="button button-primary" data-action="xhs-notes-sync" ${task.busy||(!checking && pending)||!data||row.enabled===false?'disabled':''}>${task.busy?'处理中…':pending&&!checking?'正在同步':remoteAction}</button></div>`;
+  const messages={queued:row.paused?'同步已排队，账号恢复后执行。':'同步已排队。',running:'正在同步小红书笔记。',failed:'上次笔记同步失败，可重新同步。',canceled:'上次笔记同步已取消。'};
+  const notice=task.error || messages[sync?.status] || '';
+  let body=notice?`<p class="xhs-list-footnote" role="status">${h(notice)}${sync?.error?' '+h(sync.error):''}</p>`:'';
+  if(page?.error)body+=`<div class="xhs-inline-error" role="alert">${h(page.error)}</div>`;
+  if(!data && loading)body+='<div class="xhs-data-empty" role="status">正在读取已发布笔记…</div>';
+  if(data) {
+    const {items,total,limit,offset,lastSyncedAt}=data;
+    const summary=lastSyncedAt?`<div class="xhs-official-summary"><span>已同步 ${total} 篇已发布笔记</span><span>最近同步 ${h(xhsDate(lastSyncedAt))}</span></div>`:'';
+    const rows=items.map(note=>{
+      const at=note.publishedAt&&new Date(note.publishedAt);
+      const time=at&&Number.isFinite(at.getTime())?at.toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):note.publishedTimeText;
+      return `<tr><th scope="row">${h(note.title||'未提供标题')}</th><td>${h(time||'—')}</td><td>${note.visibility==='private'?'仅自己可见':'未标明'}</td><td>${note.rawCounts?.length?h(note.rawCounts.join(' / ')):'—'}</td></tr>`;
+    }).join('');
+    const table=rows?`<div class="xhs-notes-table-wrap"><table class="xhs-notes-table xhs-published-table"><thead><tr><th scope="col">笔记标题</th><th scope="col">发布时间</th><th scope="col">可见范围</th><th scope="col">卡片计数</th></tr></thead><tbody>${rows}</tbody></table></div><p class="xhs-list-footnote">计数按小红书卡片的顺序展示，平台未标注单项含义。</p>`
+      :`<div class="xhs-data-empty"><p>${lastSyncedAt?'最近同步的记录中没有已发布笔记。':'该账号尚未同步笔记。'}</p></div>`;
+    const pager=total>limit?`<div class="xhs-draft-actions xhs-notes-pages"><button type="button" class="text-button" data-action="xhs-notes-page" data-kind="previous" data-offset="${Math.max(0,offset-limit)}" ${offset===0||loading?'disabled':''}>上一页</button><span>第 ${Math.floor(offset/limit)+1} / ${Math.ceil(total/limit)} 页</span><button type="button" class="text-button" data-action="xhs-notes-page" data-kind="next" data-offset="${offset+limit}" ${offset+limit>=total||loading?'disabled':''}>下一页</button></div>`:'';
+    body+=summary+table+pager;
+  }
+  return `<section class="panel" aria-label="已发布笔记" aria-busy="${loading}"><div class="xhs-section-heading"><h2>已发布笔记</h2>${actions}</div>${body}</section>`;
 }
 function xhsManagementView() {
-  return state.xhsSection==='overview'||!xhsAccounts().length&&!state.xhs.account&&!state.xhsProjectId?xhsAccountsView():xhsDetailWorkspaceView();
+  if(!state.xhsRoute.accountId||state.xhs?.configured===false)return xhsAccountsListView();
+  const back='<button type="button" class="text-button" data-action="xhs-account-list">返回账号列表</button>';
+  const row=xhsSelectedAccount();
+  if(!row){
+    const pending=!state.xhsAccounts&&!state.xhsAccountsError;
+    const heading=state.xhsAccountsError?'暂时无法读取账号':pending?'正在读取账号…':'该账号不在当前服务列表中';
+    return `<div class="panel xhs-overview-empty" role="status"><h3>${heading}</h3>${state.xhsAccountsError?`<p>${h(state.xhsAccountsError)}</p><button class="button button-secondary" type="button" data-action="xhs-accounts-refresh">重试</button>`:''} ${back}</div>`;
+  }
+  const tab=state.xhsRoute.tab;
+  const tabs=Object.entries(XHS_ACCOUNT_TABS).map(([key,label])=>`<button type="button" role="tab" id="xhs-tab-${key}" data-action="xhs-account-tab" data-tab="${key}" aria-selected="${key===tab}" aria-controls="xhs-tabpanel-${key}" tabindex="${key===tab?0:-1}">${label}</button>`).join('');
+  let panel;
+  if(tab==='overview')panel=xhsMetricsPanel(row)+xhsRuntimePanel(row);
+  else if(tab==='published')panel=xhsPublishedPanel();
+  else if(xhsDeliveryAccountOpen())panel=`<div id="xhs-connection-region">${xhsDraftConnectionView()}</div>${xhsDraftPanel()}`;
+  else panel='<section class="panel xhs-overview-empty" role="status"><h3>'+(state.xhsError?'暂时无法读取该账号的草稿箱':'正在读取该账号的草稿箱…')+'</h3></section>';
+  return `<div class="xhs-account-detail"><div id="xhs-account-region">${xhsAccountView()}</div>
+    <div class="xhs-tabs" role="tablist" aria-label="账号详情">${tabs}</div><div role="tabpanel" id="xhs-tabpanel-${tab}" aria-labelledby="xhs-tab-${tab}">${panel}</div></div>`;
+}
+function xhsDraftConnectionView() {
+  return `<div class="xhs-connection-notice ${xhsDeliveryReadOnly()?'is-warning':''}" role="status">${icon(xhsDeliveryReadOnly()?'alert':'lock')}<span>${h(xhsConnectionHint('送稿前会检查发布服务。'))}</span></div>`;
 }
 function xhsView() {
   if(!state.xhs)return `<section id="xhs-page" class="xhs-page xhs-management"><div class="panel xhs-loading" role="status">${state.xhsLoading?'<span class="spinner"></span>':''}<h2>${state.xhsError?'暂时没有连接上账号工作台':'正在准备小红书工作台'}</h2><p>${h(state.xhsError||'读取账号连接与草稿记录…')}</p>${state.xhsError?'<button class="button button-secondary" data-action="xhs-reload">重新连接</button>':''}</div></section>`;
-  return `<section id="xhs-page" class="xhs-page xhs-management" aria-label="小红书账号工作台"><div id="xhs-status-region" aria-live="polite">${xhsStatusView()}</div><div id="xhs-management-region" data-section="${h(state.xhsSection)}" data-profile-id="${h(xhsProfileId())}">${xhsManagementView()}</div><dialog id="xhs-account-dialog" class="xhs-account-dialog" aria-modal="true" aria-labelledby="xhs-account-editor-title"><div id="xhs-account-editor-region"></div></dialog><dialog id="xhs-detail-dialog" class="xhs-detail-dialog" aria-modal="true" aria-labelledby="xhs-detail-title"><div id="xhs-detail-region"></div></dialog></section>`;
-}
-function switchXhsTab(tab,{focus=false}={}) {
-  if(!['analytics','published','drafts'].includes(tab))return;
-  state.xhsTab=tab;rememberXhsLocation();
-  document.querySelectorAll('.xhs-tabs [role="tab"]').forEach(el=>{const selected=el.dataset.tab===tab;el.setAttribute('aria-selected',String(selected));el.tabIndex=selected?0:-1;if(selected&&focus)el.focus();});
-  for(const id of ['analytics','published','drafts']){const panel=document.querySelector('#xhs-panel-'+id);if(panel)panel.hidden=id!==tab;}
-  updateXhsComposerState();
-}
-function xhsNotesCoverage() {
-  const coverage=state.xhs?.sync?.coverage;
-  return [typeof coverage==='string'?coverage:coverage?.message,coverage?.hasMore?'仍有更多笔记，可提高读取数量后再次同步。':'',`本次同步上限 ${state.xhs?.sync?.noteLimit||coverage?.requestedLimit||state.xhsNoteLimit} 篇；列表与笔记正文分别读取。`].filter(Boolean).join(' ');
+  return `<section id="xhs-page" class="xhs-page xhs-management" aria-label="小红书账号管理"><div id="xhs-status-region" aria-live="polite">${xhsStatusView()}</div><div id="xhs-management-region" data-screen="${h(xhsScreenKey())}">${xhsManagementView()}</div><dialog id="xhs-detail-dialog" class="xhs-detail-dialog" aria-modal="true" aria-labelledby="xhs-detail-title"><div id="xhs-detail-region"></div></dialog></section>`;
 }
 function xhsStatusView() {
-  const data=state.xhs,status=data?.status||{},error=state.xhsError||status.error||data?.sync?.error,busy=xhsWorking();
-  return `${busy?`<div class="xhs-notice xhs-working" role="status"><span class="spinner spinner-small"></span><span>${h(status.message||'正在后台处理小红书操作，完成后会更新。')}</span></div>`:''}${error?`<div class="xhs-notice is-error" role="alert">${icon('alert')}<span>${h(error)}</span><button class="text-button" data-action="xhs-reload" ${busy?'disabled':''}>重新读取</button></div>`:''}`;
+  const data=state.xhs,status=data?.status||{},draftTab=state.xhsRoute.tab==='drafts'&&xhsDeliveryAccountOpen();
+  const error=state.xhsError||status.error||(draftTab&&data?.officialDraftSync?.error),busy=state.xhsBusy==='check'||(draftTab&&xhsWorking());
+  const retryAction=draftTab&&state.xhsDraftSource==='official'?'xhs-official-sync':'xhs-reload';
+  return `${busy?`<div class="xhs-notice xhs-working" role="status"><span class="spinner spinner-small"></span><span>${h(status.message||'正在后台处理小红书操作，完成后会更新。')}</span></div>`:''}${error?`<div class="xhs-notice is-error" role="alert">${icon('alert')}<span>${h(error)}</span><button class="text-button" data-action="${retryAction}" ${busy?'disabled':''}>重新读取</button></div>`:''}`;
 }
-function xhsAccountView() {
-  const data=state.xhs,account=data?.account,record=xhsAccounts().find(item=>item.profileId===xhsProfileId()),connection=data?.connection||{},connected=xhsConnected(),busy=xhsWorking(),url=xhsHref(account?.url);
-  const name=account?.nickname||xhsDisplayName(record),label=connected?'已连接':record?.duplicateOf?'重复绑定，需处理':account?.id?'需检查登录':'待扫码登录';
-  return `<div class="xhs-workspace-toolbar"><div class="xhs-context-main"><button type="button" class="text-button xhs-back-link" data-action="xhs-overview" ${state.xhsAccountBusy?'disabled':''}>${icon('arrow')}返回账号列表</button><span class="xhs-context-divider" aria-hidden="true"></span><div class="xhs-current-account">${xhsAvatarView(record||{profileId:xhsProfileId(),accountId:account?.id,avatarUrl:account?.avatar},name)}<div><h2>${h(name)}</h2><small>${h([record?.accountName&&record.accountName!==name?record.accountName:'',record?.group||'默认分组'].filter(Boolean).join(' · '))}</small></div></div><span class="xhs-connection-badge ${connected?'is-connected':''}"><i></i>${h(label)}</span></div><div class="xhs-context-actions">${url?`<a class="text-button" href="${h(url)}" target="_blank" rel="noopener noreferrer">账号主页 ↗</a>`:''}<details class="xhs-more-menu"><summary id="xhs-account-settings">账号设置 ${icon('settings')}</summary><div class="xhs-more-items"><span class="xhs-more-caption">${h(record?.accountName||name)}${record?.group?' · '+h(record.group):''}</span><button type="button" data-action="xhs-account-edit" data-profile-id="${h(xhsProfileId())}" ${state.xhsAccountBusy?'disabled':''}>备注与分组</button><button type="button" data-action="xhs-action" data-kind="check" ${busy?'disabled':''}>检查登录状态</button><button type="button" data-action="xhs-action" data-kind="login" ${busy?'disabled':''}>${xhsBound()?'重新扫码登录':'扫码绑定账号'}</button><button type="button" data-action="xhs-account-add" ${state.xhsAccountBusy?'disabled':''}>添加账号</button><div class="xhs-menu-separator"></div><button type="button" data-action="xhs-action" data-kind="disconnect" ${busy||!account&&!connection.browserOpen?'disabled':''}>关闭浏览器连接</button><button type="button" class="is-danger" data-action="xhs-account-remove" data-profile-id="${h(xhsProfileId())}" ${state.xhsAccountBusy||record?.busy?'disabled':''}>从平台移除账号</button></div></details></div></div>${!connected?`<div class="xhs-connection-notice" role="status">${icon('lock')}<span>${h(connection.message||'登录后可刷新账号数据和电脑草稿。已读取的数据仍可查看。')}</span><button class="text-button" type="button" data-action="xhs-action" data-kind="${connection.browserOpen||xhsBound()&&connection.state==='disconnected'?'check':'login'}" ${busy?'disabled':''}>${connection.browserOpen?'我已登录，检查连接':xhsBound()&&connection.state==='disconnected'?'检查登录':'扫码登录'}</button></div>`:''}`;
-}
-function xhsMetricsView() {
-  const data=state.xhs,account=data?.account,metrics=Array.isArray(data?.metrics)?data.metrics:[],basics=[['粉丝',account?.followers],['关注',account?.following],['获赞与收藏',account?.likes],['笔记数',account?.notesCount]];
-  const known=metrics.filter(m=>typeof m.value==='number'&&Number.isFinite(m.value)),missing=metrics.filter(m=>!(typeof m.value==='number'&&Number.isFinite(m.value)));
-  if(!account&&!known.length)return `<div class="xhs-onboarding"><span class="xhs-onboarding-icon" aria-hidden="true">${icon('chart')}</span><h3>从一个账号，开始看见内容的表现</h3><p>${xhsAccounts().length?'在上方扫码连接账号，即可同步数据与内容。':'先添加一个账号，再扫码完成连接。'}你的笔记和电脑草稿会集中保存在这个工作区。</p><ol><li><span>01</span>扫码连接账号</li><li><span>02</span>同步数据与笔记</li><li><span>03</span>查看或送出草稿</li></ol></div>`;
-  const metricView=metric=>`<article><span>${h(metric.label||metric.id)}</span><strong>${h(xhsValue(metric.value))}${metric.unit?`<small>${h(metric.unit)}</small>`:''}</strong>${metric.period?`<small>${h(metric.period)}</small>`:''}${metric.source?`<small class="xhs-metric-source">来源：${h(xhsHref(metric.source)?'创作者中心':metric.source)}</small>`:''}</article>`;
-  const coverage=typeof data?.sync?.coverage==='string'?data.sync.coverage:data?.sync?.coverage?.message;
-  return `<div class="xhs-basic-metrics">${basics.map(([label,value])=>`<div><span>${label}</span><strong class="${value==null?'is-missing':''}">${h(xhsValue(value))}</strong></div>`).join('')}</div>${xhsHistoryView()}${known.length?`<div class="xhs-metrics-label"><h3>已获取指标</h3><span>按官方标注的统计周期展示</span></div><div class="xhs-detail-metrics">${known.map(metricView).join('')}</div>`:`<div class="xhs-data-empty">${icon('chart')}<p>${xhsConnected()?'同步后显示创作者中心实际提供的指标。':'连接账号后，在这里查看可获取的运营数据。'}</p></div>`}${missing.length?`<details id="xhs-missing-metrics" class="xhs-missing-metrics" ${state.xhsMissingOpen?'open':''}><summary>未获取的指标 <span>${missing.length} 项</span></summary><div>${missing.map(metric=>`<p><span>${h(metric.label||metric.id)}</span><small>${h(metric.message||metric.reason||'未获取')}${metric.period?' · '+h(metric.period):''}</small></p>`).join('')}</div></details>`:''}<p class="xhs-data-note">${h(coverage||'指标只读展示。未提供、无权限或读取失败的指标保留「未获取」。')} 近 7 日等滚动指标不换算为单日增量。</p>`;
-}
-function xhsHistoryView() {
-  const rows=(Array.isArray(state.xhs?.analyticsHistory)?state.xhs.analyticsHistory:[]).filter(row=>row.accountId===xhsAccountId()&&Number.isFinite(Date.parse(row.at))).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at)).slice(-30);
-  const points=rows.map(row=>({at:Date.parse(row.at),label:xhsDate(row.at),value:typeof row.account?.followers==='number'&&Number.isFinite(row.account.followers)?row.account.followers:null}));
-  const valid=points.filter(p=>p.value!==null);
-  const current=state.xhs?.account?.followers,latest=valid.at(-1),syncedAt=Date.parse(state.xhs?.sync?.lastSyncAt);
-  if(latest&&Number.isFinite(current)&&latest.at===syncedAt&&latest.value!==current)return '<section class="xhs-history"><div class="xhs-history-heading"><h3>粉丝变化</h3><span>数据待核对</span></div><p class="xhs-history-empty">当前粉丝数与同一时间的历史快照不一致，趋势暂不展示。请重新同步账号数据后核对。</p></section>';
-  if(valid.length<2)return `<section class="xhs-history"><div class="xhs-history-heading"><h3>粉丝变化</h3><span>每次同步的实际快照</span></div><p class="xhs-history-empty">${valid.length?'已有 1 次有效记录，再次同步后可比较粉丝变化。':'累计 2 次有效同步后显示趋势。'}</p></section>`;
-  const w=760,ht=150,l=0,r=0,t=12,b=12,minX=points[0].at,maxX=points.at(-1).at,minV=Math.min(...valid.map(p=>p.value)),maxV=Math.max(...valid.map(p=>p.value)),pad=Math.max(1,(maxV-minV)*.15),low=Math.max(0,minV-pad),high=maxV+pad;
-  const x=p=>l+(p.at-minX)/(maxX-minX||1)*(w-l-r),y=p=>t+(high-p.value)/(high-low||1)*(ht-t-b);
-  const segments=[];let segment=[];for(const point of points){if(point.value===null){if(segment.length)segments.push(segment);segment=[];}else segment.push(point);}if(segment.length)segments.push(segment);
-  const first=valid[0],last=valid.at(-1),delta=last.value-first.value;
-  return `<section class="xhs-history"><div class="xhs-history-heading"><h3>粉丝变化</h3><span>${h(xhsDate(first.at))} 至 ${h(xhsDate(last.at))} · 净变化 ${delta>0?'+':''}${h(xhsValue(delta))}</span></div><div class="xhs-history-plot"><div class="xhs-chart-y-labels" aria-hidden="true"><span>${h(xhsValue(Math.round(high)))}</span><span>${h(xhsValue(Math.round(low)))}</span></div><div class="xhs-chart-canvas"><svg class="xhs-history-chart" viewBox="0 0 ${w} ${ht}" preserveAspectRatio="none" role="img" aria-label="${h(valid.map(p=>p.label+'：'+p.value+' 位粉丝').join('；'))}"><path class="xhs-chart-grid" d="M${l} ${t}H${w-r}M${l} ${ht-b}H${w-r}"/>${segments.filter(segment=>segment.length>1).map(segment=>`<polyline points="${segment.map(p=>x(p)+','+y(p)).join(' ')}"/>`).join('')}${valid.map(p=>`<path class="xhs-chart-point-mark" d="M${x(p)} ${y(p)}h0"><title>${h(p.label)}：${h(xhsValue(p.value))}</title></path>`).join('')}</svg></div></div><div class="xhs-chart-dates" aria-hidden="true"><span>${h(new Date(points[0].at).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}))}</span><span>${h(new Date(points.at(-1).at).toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'}))}</span></div><p>仅比较粉丝总数的实测快照；横轴为实际同步时间，未获取的记录处断开连线。</p></section>`;
-}
-function xhsImageUrl(value) {
-  if(typeof value!=='string'||!value)return '';
-  if(/^\/(?:media|api\/xhs\/images|xhs-media)\//.test(value))return value;
-  try{const url=new URL(value);return url.protocol==='https:'&&!url.username&&!url.password?url.href:'';}catch{return '';}
-}
-function xhsNotesView() {
-  const all=(Array.isArray(state.xhs?.notes)?state.xhs.notes:[]).filter(note=>!note.accountId||note.accountId===xhsAccountId());
-  const search=state.xhsNoteSearch.trim().toLocaleLowerCase(),sort=state.xhsNoteSort;
-  const value=note=>sort==='recent'?(Date.parse(note.publishedAt)||0):(typeof note[sort]==='number'&&Number.isFinite(note[sort])?note[sort]:-1);
-  const notes=all.filter(note=>!search||String(note.title||'').toLocaleLowerCase().includes(search)).sort((a,b)=>value(b)-value(a));
-  if(!notes.length)return `<div class="xhs-data-empty">${icon('cards')}<p>${search?'没有找到匹配的笔记，试试其他标题关键词。':'还没有读取到笔记。同步后会显示封面、标题和互动数据。'}</p></div>`;
-  return `<div class="xhs-notes-table-wrap"><table class="xhs-notes-table"><thead><tr><th scope="col">笔记</th><th scope="col">阅读</th><th scope="col">赞</th><th scope="col">藏</th><th scope="col">评</th></tr></thead><tbody>${notes.map(note=>{const image=xhsImageUrl(note.imageUrl||note.coverUrl||note.cover?.url||note.cover);return `<tr><td><button class="xhs-note-open" type="button" data-action="xhs-detail" data-kind="note" data-id="${h(note.id)}" aria-label="预览已发布笔记：${h(note.title||'未命名笔记')}">${image?`<img src="${h(image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:`<span class="xhs-note-cover-placeholder">${icon('image')}</span>`}<span><strong>${h(note.title||'未命名笔记')}</strong><small>${note.publishedAt?h(xhsDate(note.publishedAt)):'发布时间未获取'}</small><em>${note.contentStatus?.isComplete?'已读取官方内容':'点击预览正文与图片'}</em></span></button></td>${['views','likes','collects','comments'].map(key=>`<td>${h(xhsValue(note[key]))}</td>`).join('')}</tr>`;}).join('')}</tbody></table></div>`;
+function publisherCheckButton() {
+  return `<button type="button" class="button button-secondary" data-action="xhs-check-service" ${xhsWorking()?'disabled':''}>${icon('refresh')}检查服务</button>`;
 }
 function xhsFilteredDrafts(items) {
   const search=state.xhsDraftSearch.trim().toLocaleLowerCase();
@@ -1237,16 +1276,25 @@ function xhsFilteredDrafts(items) {
     return state.xhsDraftSort==='oldest'?timeA-timeB:timeB-timeA;
   });
 }
-function xhsOfficialDraftsView() {
-  const all=(state.xhs?.officialDrafts||[]).filter(draft=>!draft.accountId||draft.accountId===xhsAccountId()),drafts=xhsFilteredDrafts(all),sync=state.xhs?.officialDraftSync||{},coverage=typeof sync.coverage==='string'?sync.coverage:sync.coverage?.message;
-  const summary=`<div class="xhs-official-summary"><span>${state.xhsDraftSearch?'找到 '+drafts.length+' / '+all.length+' 份草稿':'共 '+all.length+' 份草稿'}</span><span>数据更新 ${h(xhsDate(sync.lastSyncAt))}</span></div>`;
-  const error=sync.error?`<div class="xhs-inline-error" role="alert">${h(sync.error)}<button class="text-button" data-action="xhs-official-sync" ${xhsWorking()||!xhsConnected()?'disabled':''}>重新读取</button></div>`:'';
-  const empty=`<div class="xhs-data-empty">${icon('file')}<p>${state.xhsDraftSearch?'没有匹配的草稿，试试其他标题关键词。':sync.lastSyncAt?'本次未读到可见的电脑草稿。':'点击「刷新草稿」，读取小红书电脑端当前可见的草稿。'}</p>${state.xhsDraftSearch?'<button class="text-button" type="button" data-action="xhs-clear-draft-search">清空搜索</button>':''}</div>`;
-  return summary+error+(drafts.length?`<p class="xhs-table-scroll-hint">左右滑动，查看保存时间与草稿操作</p><div class="xhs-content-table-wrap"><table class="xhs-content-table xhs-drafts-table"><caption class="sr-label">小红书官方电脑草稿</caption><thead><tr><th scope="col">草稿内容</th><th scope="col">类型</th><th scope="col">保存时间</th><th scope="col">内容预览</th><th scope="col">操作</th></tr></thead><tbody>${drafts.map(draft=>{
-    const image=xhsImageUrl(draft.imageUrl),cached=Boolean(draft.contentStatus?.lastSyncAt||['ready','partial'].includes(draft.contentStatus?.state)),canPreview=draft.canRead!==false||cached;
-    const title=`${image?`<img src="${h(image)}" alt="" loading="lazy" referrerpolicy="no-referrer">`:`<span class="xhs-note-cover-placeholder" aria-hidden="true">${icon('file')}</span>`}<span><strong>${h(draft.title||'未命名电脑草稿')}</strong></span>`;
-    return `<tr><td>${canPreview?`<button class="xhs-content-title" type="button" data-action="xhs-detail" data-kind="official-draft" data-id="${h(draft.key)}" aria-label="预览草稿：${h(draft.title||'未命名电脑草稿')}">${title}</button>`:`<div class="xhs-content-title">${title}</div>`}</td><td>${h(({image:'图文',video:'视频'})[draft.kind]||draft.kind||'未获取')}</td><td class="xhs-table-time">${draft.updatedAt?h(xhsDate(draft.updatedAt)):draft.updatedAtLabel?h(draft.updatedAtLabel):'未获取'}</td><td><span class="xhs-preview-state ${canPreview?'is-ready':''}">${cached?'已读取':canPreview?'可预览':'暂不支持预览'}</span></td><td><div class="xhs-row-actions">${canPreview?`<button class="text-button" type="button" data-action="xhs-detail" data-kind="official-draft" data-id="${h(draft.key)}">${cached&&!xhsConnected()?'预览缓存':'预览'}</button>`:''}<button class="text-button" type="button" data-action="xhs-official-open" data-id="${h(draft.key)}" ${xhsWorking()||!xhsConnected()?'disabled':''}>官网编辑 ↗</button></div></td></tr>`;
-  }).join('')}</tbody></table></div>`:empty)+`<p class="xhs-data-note">${h(coverage||'此处展示小红书电脑端草稿，不包含手机本地草稿。')}</p>`;
+const publisherPhases = {
+  queued_create:'等待创建', downloading:'准备图片', creating:'保存并核验中', ready:'等待核验',
+  queued_update:'等待修改',downloading_update:'准备替换配图',updating:'正在写入修改',update_failed:'修改素材准备失败',
+  queued_schedule:'等待预约', scheduling:'正在预约', submit_intent:'待确认预约结果',
+  scheduled:'预约待核验', create_failed:'素材准备失败', needs_attention:'需人工核对', canceled_create:'创建已取消'
+};
+function publisherDraftStatus(draft) {
+  if(draft.phase==='ready'&&draft.platformStatus==='draft_verified')return '草稿已核验';
+  if(draft.phase==='scheduled'&&draft.platformStatus==='scheduled')return '已预约';
+  return publisherPhases[draft.phase]||'状态待确认';
+}
+function publisherDraftsView() {
+  const sync=state.xhs.officialDraftSync||{},coverage=sync.coverage||{};
+  const items=(state.xhs.officialDrafts||[]).filter(item=>item.accountId===xhsAccountId());
+  const shown=xhsFilteredDrafts(items);
+  const offset=Number(coverage.offset)||0,limit=Number(coverage.limit)||50;
+  const pageButtons=offset>0||coverage.hasMore?`<div class="xhs-draft-actions"><button type="button" class="text-button" data-action="xhs-service-page" data-offset="${Math.max(0,offset-limit)}" ${offset<=0||xhsWorking()?'disabled':''}>上一页</button><span>第 ${Math.floor(offset/limit)+1} 页</span><button type="button" class="text-button" data-action="xhs-service-page" data-offset="${offset+limit}" ${!coverage.hasMore||xhsWorking()?'disabled':''}>下一页</button></div>`:'';
+  const rows=shown.map(draft=>`<tr><td><button class="text-button" type="button" data-action="xhs-detail" data-kind="official-draft" data-id="${h(draft.key)}">${h(draft.title||'未命名草稿')}</button></td><td>${h(publisherDraftStatus(draft))}</td><td>${h(draft.imageCount??'—')}</td><td>${h(xhsDate(draft.updatedAt))}</td></tr>`).join('');
+  return `${sync.error?`<div class="xhs-inline-error" role="alert">${h(sync.error)}</div>`:''}${sync.lastSyncAt?`<div class="xhs-official-summary"><span>本页 ${items.length} 份草稿</span><span>读取于 ${h(xhsDate(sync.lastSyncAt))}</span></div>`:''}${rows?`<div class="xhs-content-table-wrap"><table class="xhs-content-table"><thead><tr><th scope="col">草稿标题</th><th scope="col">处理状态</th><th scope="col">配图</th><th scope="col">更新时间</th></tr></thead><tbody>${rows}</tbody></table></div>`:`<div class="xhs-data-empty"><p>${state.xhsDraftSearch?'本页没有匹配的草稿。':sync.lastSyncAt?'本页暂无服务草稿。':'点击「读取服务草稿」查看这个账号的草稿。'}</p></div>`}${pageButtons}`;
 }
 function xhsExistingDraft(projectId=state.xhsProjectId) {
   return (state.xhs?.drafts||[]).find(draft=>draft.projectId===projectId&&draft.accountId===xhsAccountId()&&['queued','running','filled','unknown','interrupted'].includes(draft.status));
@@ -1255,108 +1303,134 @@ function xhsComposerView() {
   const available=state.projects.filter(xhsEligible),p=available.find(project=>project.id===state.xhsProjectId),preview=state.xhsPreview;
   if(p&&!preview)state.xhsPreview={title:p.title||'',content:p.caption||'',accountId:xhsAccountId()};
   const draft=state.xhsPreview;
-  return `<form id="xhs-draft-form"><label for="xhs-project">选择已完成的作品</label><select id="xhs-project" name="projectId" ${state.xhsBusy==='draft'?'disabled':''}><option value="">选择一份图文…</option>${available.map(project=>`<option value="${h(project.id)}" ${p?.id===project.id?'selected':''}>${h(project.title||'未命名作品')}</option>`).join('')}</select>${!available.length?'<p class="field-help">完成文案和全部图片后，即可在这里选择作品。</p><button type="button" class="text-button" data-action="navigate" data-view="briefing">去创作图文 →</button>':''}${p&&draft?`<div class="xhs-preview-target" id="xhs-preview-target">${xhsBound()?`${icon(xhsConnected()?'check':'lock')}目标账号：${h(state.xhs.account.nickname||state.xhs.account.id)}${xhsConnected()?'':' · 送稿时自动检查登录'}`:`${icon('lock')}请先扫码绑定小红书账号`}</div><div class="xhs-preview-images" aria-label="本次草稿图片，按原作品顺序">${p.pages.map((page,index)=>`<figure><img src="${h(page.imageUrl)}" alt="第 ${index+1} 张：${h(page.title)}" loading="lazy"><figcaption>${String(index+1).padStart(2,'0')}</figcaption></figure>`).join('')}</div><div class="xhs-preview-label"><label for="xhs-title">小红书标题</label><span id="xhs-title-count"></span></div><input id="xhs-title" name="title" ${state.xhsBusy==='draft'?'disabled':''} value="${h(draft.title)}" placeholder="为这篇图文取个标题" required><div class="xhs-preview-label"><label for="xhs-content">帖子正文</label><span id="xhs-content-count"></span></div><textarea id="xhs-content" name="content" rows="7" ${state.xhsBusy==='draft'?'disabled':''} placeholder="检查正文和话题，确认后送入草稿">${h(draft.content)}</textarea><p class="field-help">这里的调整只用于本次小红书草稿，原作品会保留。</p><div id="xhs-submit-notice" class="xhs-submit-notice" role="status"></div><button id="xhs-submit-draft" type="submit" class="button button-primary button-full">${icon('arrow')}确认送入电脑草稿</button><p class="xhs-submit-help">会向上方账号上传 ${p.pages.length} 张图片并准备草稿；发布由你在小红书决定。</p>`:'<div class="xhs-composer-empty">'+icon('image')+'<p>选择作品后，先在这里检查图片、标题和正文。</p></div>'}</form>`;
+  return `<form id="xhs-draft-form"><label for="xhs-project">选择已完成的作品</label><select id="xhs-project" name="projectId" ${state.xhsBusy==='draft'?'disabled':''}><option value="">选择一份图文…</option>${available.map(project=>`<option value="${h(project.id)}" ${p?.id===project.id?'selected':''}>${h(project.title||'未命名作品')}</option>`).join('')}</select>${!available.length?'<p class="field-help">完成文案和全部图片后，即可在这里选择作品。</p><button type="button" class="text-button" data-action="navigate" data-view="briefing">去创作图文 →</button>':''}${p&&draft?`<div class="xhs-preview-target" id="xhs-preview-target">${xhsBound()?`${icon(xhsConnected()?'check':'lock')}目标账号：${h(state.xhs.account.nickname||state.xhs.account.id)}${xhsConnected()?'':' · '+xhsAvailabilityHint}`:`${icon('lock')}${h(xhsAccountSetupHint())}`}</div><div class="xhs-preview-images" aria-label="本次草稿图片，按原作品顺序">${p.pages.map((page,index)=>`<figure><img src="${h(page.imageUrl)}" alt="第 ${index+1} 张：${h(page.title)}" loading="lazy"><figcaption>${String(index+1).padStart(2,'0')}</figcaption></figure>`).join('')}</div><div class="xhs-preview-label"><label for="xhs-title">小红书标题</label><span id="xhs-title-count"></span></div><input id="xhs-title" name="title" ${state.xhsBusy==='draft'?'disabled':''} value="${h(draft.title)}" placeholder="为这篇图文取个标题" required><div class="xhs-preview-label"><label for="xhs-content">帖子正文</label><span id="xhs-content-count"></span></div><textarea id="xhs-content" name="content" rows="7" ${state.xhsBusy==='draft'?'disabled':''} placeholder="检查正文和话题，确认后送入草稿">${h(draft.content)}</textarea><p class="field-help">这里的调整只用于本次小红书草稿，原作品会保留。</p><div id="xhs-submit-notice" class="xhs-submit-notice" role="status"></div><button id="xhs-submit-draft" type="submit" class="button button-primary button-full">${icon('arrow')}确认送入电脑草稿</button><p class="xhs-submit-help">会向上方账号上传 ${p.pages.length} 张图片并保存草稿。核验后，可从作品记录预约发布。</p>`:'<div class="xhs-composer-empty">'+icon('image')+'<p>选择作品后，先在这里检查图片、标题和正文。</p></div>'}</form>`;
+}
+function xhsRetryLabel(draft) {
+  return ({recover_receipt:'找回任务回执',download:'重试素材下载',resubmit:'重新提交原请求'})[draft.retryMode]||'重新准备草稿';
 }
 function xhsDraftsView() {
   const drafts=xhsFilteredDrafts((state.xhs?.drafts||[]).filter(draft=>draft.accountId===xhsAccountId()));
   if(!drafts.length)return `<div class="xhs-data-empty"><p>${state.xhsDraftSearch?'没有匹配的送稿记录，试试其他标题关键词。':'送出的草稿会留在这里，展示真实处理结果。'}</p></div>`;
-  return drafts.map(draft=>`<article class="xhs-draft-item"><div><span class="xhs-draft-state status-${h(draft.status)}">${['queued','running'].includes(draft.status)?'<span class="spinner spinner-small"></span>':''}${h(draft.rechecking?'正在重新核验草稿':XHS_DRAFT_LABELS[draft.status]||'状态待核验')}</span><small>${h(xhsDate(draft.updatedAt||draft.createdAt))}</small></div><h3>${h(draft.title||'未命名草稿')}</h3><p>${h(draft.message||'请到小红书电脑草稿页核对内容。')}</p>${draft.verifiedAt?`<small>核验时间 ${h(xhsDate(draft.verifiedAt))}</small>`:''}<div class="xhs-draft-actions"><button type="button" class="text-button" data-action="xhs-detail" data-kind="submission" data-id="${h(draft.id)}">预览本地冻结稿</button>${xhsCanRecheck(draft)?`<button type="button" class="text-button" data-action="xhs-recheck" data-id="${h(draft.id)}" ${xhsWorking()||!xhsConnected()||draft.accountId!==xhsAccountId()?'disabled':''}>${icon('refresh')}重新核验草稿</button>`:''}${draft.canRetry&&draft.accountId===xhsAccountId()?`<button type="button" class="text-button" data-action="xhs-retry" data-id="${h(draft.id)}" ${xhsWorking()||!xhsConnected()?'disabled':''}>重新准备草稿</button>`:''}${['verified','filled','unknown','interrupted'].includes(draft.status)?`<button type="button" class="text-button" data-action="xhs-action" data-kind="open-drafts" ${xhsWorking()||!xhsConnected()||draft.accountId!==xhsAccountId()?'disabled':''}>打开电脑草稿核对 ↗</button>`:''}</div></article>`).join('');
+  return drafts.map(draft=>`<article class="xhs-draft-item"><div><span class="xhs-draft-state status-${h(draft.status)}">${['queued','running'].includes(draft.status)?'<span class="spinner spinner-small"></span>':''}${h(draft.rechecking?'正在重新核验草稿':XHS_DRAFT_LABELS[draft.status]||'状态待核验')}</span><small>${h(xhsDate(draft.updatedAt||draft.createdAt))}</small></div><h3>${h(draft.title||'未命名草稿')}</h3><p>${h(draft.message||'请在发布服务核对此任务。')}</p>${draft.verifiedAt?`<small>核验时间 ${h(xhsDate(draft.verifiedAt))}</small>`:''}${draft.remoteJobId?`<small>服务任务 <code>${h(draft.remoteJobId)}</code></small>`:''}<div class="xhs-draft-actions"><button type="button" class="text-button" data-action="xhs-detail" data-kind="submission" data-id="${h(draft.id)}">预览本地冻结稿</button>${xhsCanRecheck(draft)?`<button type="button" class="text-button" data-action="xhs-recheck" data-id="${h(draft.id)}" ${xhsWorking()||draft.accountId!==xhsAccountId()?'disabled':''}>${icon('refresh')}查询任务结果</button>`:''}${draft.canRetry&&draft.accountId===xhsAccountId()&&!xhsDeliveryReadOnly()?`<button type="button" class="text-button" data-action="xhs-retry" data-id="${h(draft.id)}" ${xhsWorking()?'disabled':''}>${h(xhsRetryLabel(draft))}</button>`:''}</div></article>`).join('');
 }
 function xhsDetailPath(detail=state.xhsDetail) {
   if(!detail)return '';
-  const group=detail.kind==='note'?'notes':detail.kind==='official-draft'?'official-drafts':'submissions';
+  const group=detail.kind==='official-draft'?'official-drafts':'submissions';
   return `/api/xhs/${group}/${encodeURIComponent(detail.id)}`;
 }
 function xhsDetailCurrent(detail,version) {
-  return state.view==='xhs'&&state.xhsDetail===detail&&detail.accountId===xhsAccountId()&&detail.profileId===xhsProfileId()&&version===xhsDetailRequestVersion;
+  return state.view==='xhs'&&state.xhsDetail===detail&&detail.accountId===xhsAccountId()&&detail.providerKey===state.xhs?.providerKey&&version===xhsDetailRequestVersion;
 }
 function closeXhsDetail({restoreFocus=true}={}) {
+  clearTimeout(state.xhsDetail?.poll);
+  document.querySelector('#xhs-draft-editor[open]')?.close();
   ++xhsDetailRequestVersion;state.xhsDetail=null;
   const dialog=document.querySelector('#xhs-detail-dialog');if(dialog?.open)dialog.close();
-  if(restoreFocus){const target=xhsDetailReturnFocus?.isConnected?xhsDetailReturnFocus:document.querySelector('.xhs-tabs [aria-selected="true"]');target?.focus({preventScroll:true});}
+  if(restoreFocus){const target=xhsDetailReturnFocus?.isConnected?xhsDetailReturnFocus:document.querySelector('.xhs-draft-source [aria-pressed="true"]');target?.focus({preventScroll:true});}
   xhsDetailReturnFocus=null;
 }
 function updateXhsDetail() {
   const current=state.xhsDetail,region=document.querySelector('#xhs-detail-region');if(!current||!region)return;
-  const detail=current.detail,local=current.kind==='submission',officialDraft=current.kind==='official-draft',busy=current.loading||current.waiting,images=(Array.isArray(detail?.images)?detail.images:[]).map(image=>xhsImageUrl(typeof image==='string'?image:image?.url)).filter(Boolean),url=xhsHref(detail?.url),content=typeof detail?.content==='string'?detail.content:'',tags=Array.isArray(detail?.tags)?detail.tags:[];
-  const source=local?'本平台冻结稿':officialDraft?'小红书官方电脑草稿':'小红书官方已发布笔记';
-  const status=local?'送稿时保存的本地版本，官网后续修改不回写此处。':detail?.isComplete?'已读取官方内容':detail?'官方内容读取不完整，请核对下方来源说明。':'尚未读取到官方正文与图片。';
+  const detail=current.detail,local=current.kind==='submission',busy=current.loading;
+  const images=(Array.isArray(detail?.images)?detail.images:[]).filter(image=>typeof image==='string'&&(local?image.startsWith('/media/'):image.startsWith('/api/xhs/official-drafts/'+current.id+'/images/')));
+  const confirmed=detail?.phase==='ready'&&detail?.platformStatus==='draft_verified'&&!detail.pendingUpdate;
+  const scheduled=detail?.phase==='scheduled'&&detail?.platformStatus==='scheduled';
+  const version=detail?.contentVersion?' · 第 '+detail.contentVersion+' 版':'';
+  const content=typeof detail?.content==='string'?detail.content:'';
+  const source=local?'送稿时的内容':'发布服务草稿';
+  const status=local?'送稿时保存的版本':detail?publisherDraftStatus(detail):'查询服务草稿';
   const focused=document.activeElement,focusAction=focused?.closest('#xhs-detail-region')?focused.dataset.action:null,scroll=region.closest('dialog')?.scrollTop||0;
-  region.innerHTML=`<div class="xhs-detail-heading"><div><span class="xhs-detail-source">${h(source)}</span><h2 id="xhs-detail-title">${h(detail?.title||current.title||'内容预览')}</h2></div><button class="icon-button" type="button" data-action="xhs-detail-close" aria-label="关闭内容预览">${icon('close')}</button></div><div class="xhs-detail-body"><div class="xhs-detail-status ${detail&&!detail.isComplete&&!local?'is-warning':''}"><strong>${h(status)}</strong>${detail?.message?`<p>${h(detail.message)}</p>`:''}${detail?.fetchedAt||detail?.lastSyncAt?`<small>读取时间 ${h(xhsDate(detail.fetchedAt||detail.lastSyncAt))}</small>`:''}</div>${busy?`<div class="xhs-detail-loading" role="status"><span class="spinner spinner-small"></span>${current.waiting?'正在官方页面读取内容，完成后会自动更新…':'正在读取内容…'}</div>`:''}${current.error?`<div class="xhs-inline-error" role="alert">${h(current.error)}</div>`:''}${images.length?`<div class="xhs-detail-images" aria-label="${h(source)}图片，共 ${images.length} 张">${images.map((image,i)=>`<figure><img src="${h(image)}" alt="第 ${i+1} 张图片" loading="lazy" referrerpolicy="no-referrer"><figcaption>${i+1} / ${images.length}</figcaption></figure>`).join('')}</div>`:!busy?'<p class="xhs-detail-empty">图片未获取</p>':''}${content?`<div class="xhs-detail-content">${h(content)}</div>`:!busy?'<p class="xhs-detail-empty">正文未获取</p>':''}${tags.length?`<div class="xhs-detail-tags">${tags.filter(tag=>typeof tag==='string').map(tag=>`<span>${h(tag.startsWith('#')?tag:'#'+tag)}</span>`).join('')}</div>`:''}<div class="xhs-detail-actions">${current.error&&!busy?'<button class="button button-secondary" type="button" data-action="xhs-detail-retry">重试读取预览</button>':''}${!local?`<button class="button button-secondary" type="button" data-action="xhs-detail-read" ${busy||xhsWorking()||!xhsConnected()?'disabled':''}>${icon('refresh')}${detail?'重新读取官方内容':'读取官方内容'}</button>`:``}${officialDraft?`<button class="text-button" type="button" data-action="xhs-official-open" data-id="${h(current.id)}" ${xhsWorking()||!xhsConnected()?'disabled':''}>到官网编辑 ↗</button>`:url&&current.kind!=='note'?`<a class="text-button" href="${h(url)}" target="_blank" rel="noopener noreferrer">在官网查看 ↗</a>`:''}</div>${!local&&!xhsConnected()?'<p class="field-help">重新连接账号后可读取最新官方内容；已读取内容仍可查看。</p>':''}</div>`;
+  region.innerHTML=`<div class="xhs-detail-heading"><div><span class="xhs-detail-source">${source}</span><h2 id="xhs-detail-title">${h(detail?.title||current.title||'内容预览')}</h2></div><button class="icon-button" type="button" data-action="xhs-detail-close" aria-label="关闭内容预览">${icon('close')}</button></div>
+    <div class="xhs-detail-body"><div class="xhs-detail-status"><strong>${h(status+version)}</strong>${detail?.message?`<p>${h(detail.message)}</p>`:''}</div>
+    ${busy?'<div class="xhs-detail-loading" role="status"><span class="spinner spinner-small"></span>正在读取内容…</div>':''}
+    ${current.error?`<div class="xhs-inline-error" role="alert">${h(current.error)}</div><button class="button button-secondary" type="button" data-action="xhs-detail-retry">重试读取预览</button>`:''}
+    ${images.length?`<div class="xhs-detail-images" aria-label="送稿图片">${images.map((image,i)=>`<figure><img src="${h(image)}" alt="第 ${i+1} 张图片" loading="lazy"><figcaption>${i+1} / ${images.length}</figcaption></figure>`).join('')}</div>`:''}
+    ${detail&&!local?`<p class="xhs-detail-empty">配图 ${h(detail.imageCount??'—')} 张</p>`:''}
+    ${content?`<div class="xhs-detail-content">${h(content)}</div>`:''}
+    ${detail?.pendingUpdate?`<div class="xhs-detail-status"><strong>待核验 · 第 ${h(detail.pendingUpdate.contentVersion)} 版</strong><p>${h(detail.pendingUpdate.title)} · ${h(detail.pendingUpdate.imageCount)} 张配图</p></div>`:''}
+    ${current.editNotice?`<p role="status">${h(current.editNotice)}</p>`:''}
+    ${detail&&!local?`<div class="xhs-draft-actions">${detail.editable?`<button type="button" class="button button-secondary" data-action="xhs-edit-official">修改这份草稿</button>`:h(detail.editBlockReason||'')}
+    ${(confirmed||scheduled)&&detail.contentVersion&&detail.contentHash?`<button type="button" class="button button-secondary" data-action="xhs-schedule-official" data-id="${h(current.id)}">${scheduled?'查看预约':'预约这版草稿'}</button>`:''}<button type="button" class="text-button" data-action="xhs-detail-retry">刷新进度</button></div>`:''}
+    ${detail?.versions?.length?`<details><summary>历史版本（${detail.versions.length}）</summary>${detail.versions.map(v=>`<details><summary>第 ${h(v.contentVersion)} 版 · ${h(v.title)}</summary><p class="xhs-detail-content">${h(v.content)}</p><div class="xhs-detail-images">${v.images.map((url,i)=>`<img src="${h(url)}" alt="历史版本配图 ${i+1}" loading="lazy">`).join('')}</div></details>`).join('')}</details>`:''}
+    ${detail&&!local?`<p class="xhs-data-note">服务草稿编号 <code>${h(current.id)}</code></p>`:''}</div>`;
   if(focusAction)region.querySelector(`[data-action="${focusAction}"]`)?.focus({preventScroll:true});
   if(region.closest('dialog'))region.closest('dialog').scrollTop=scroll;
 }
 async function openXhsDetail(kind,id,trigger) {
-  if(!['note','official-draft','submission'].includes(kind)||!id||!xhsAccountId())return;
-  const collection=kind==='note'?state.xhs.notes:kind==='official-draft'?state.xhs.officialDrafts:state.xhs.drafts;
+  if(!['official-draft','submission'].includes(kind)||!id||!xhsDeliveryAccountOpen())return;
+  const collection=kind==='official-draft'?state.xhs.officialDrafts:state.xhs.drafts;
   const item=(collection||[]).find(item=>(kind==='official-draft'?item.key:item.id)===id&&(!item.accountId||item.accountId===xhsAccountId()));
   if(!item)return;
   closeXhsDetail({restoreFocus:false});xhsDetailReturnFocus=trigger;
-  const current={kind,id,accountId:xhsAccountId(),profileId:xhsProfileId(),title:item.title||'',detail:null,loading:true,waiting:false,error:''};state.xhsDetail=current;
+  const current={kind,id,accountId:xhsAccountId(),providerKey:state.xhs?.providerKey,title:item.title||'',detail:null,loading:true,error:''};state.xhsDetail=current;
   const version=++xhsDetailRequestVersion;updateXhsDetail();
   const dialog=document.querySelector('#xhs-detail-dialog');if(!dialog)return;dialog.showModal();dialog.querySelector('[data-action="xhs-detail-close"]')?.focus();
-  await getXhsDetail(current,version,{readIfMissing:true});
+  await getXhsDetail(current,version);
 }
-async function getXhsDetail(current,version,{readIfMissing=false}={}) {
+async function getXhsDetail(current,version) {
   try{
-    const result=await api(xhsDetailPath(current)+'?accountId='+encodeURIComponent(current.accountId));
+    const query=new URLSearchParams({accountId:current.accountId});
+    if(current.editReceipt)query.set('editJobId',current.editReceipt.jobId);
+    const result=await api(xhsDetailPath(current)+'?'+query);
     if(!xhsDetailCurrent(current,version))return;
-    current.detail=result.detail||null;current.loading=false;current.waiting=false;
+    if((result.accountId&&result.accountId!==current.accountId)||(result.detail?.accountId&&result.detail.accountId!==current.accountId))throw new Error('草稿内容不属于当前账号，请重新读取。');
+    current.detail=result.detail||null;current.loading=false;
     current.error=result.contentStatus?.error||(!result.detail&&current.kind==='submission'?'这份送稿记录的本地冻结稿暂不可读取。':'');
-    updateXhsDetail();
-    if(!result.detail&&readIfMissing&&current.kind!=='submission'){
-      if(xhsConnected()&&!xhsWorking())await readXhsDetail();
-      else{current.error=xhsWorking()?'当前有小红书操作正在进行，完成后可点击「读取官方内容」。':'请先重新连接账号，再读取官方内容。';updateXhsDetail();}
+    clearTimeout(current.poll);
+    if(current.kind==='official-draft'&&current.detail){
+      const draft=current.detail,receipt=current.editReceipt;
+      const job=draft.editJob;
+      const jobMatches=receipt&&job?.id===receipt.jobId&&job.status==='succeeded'&&job.contentVersion===receipt.contentVersion
+        &&(!job.contentHash||job.contentHash===draft.contentHash);
+      if(jobMatches&&draft.activeJobId===receipt.jobId&&draft.contentVersion===receipt.contentVersion&&draft.phase==='ready'&&draft.platformStatus==='draft_verified'&&!draft.pendingUpdate&&draft.contentHash){
+        current.editNotice='微服务已核验本次修改。';current.editReceipt=null;
+      } else if(receipt&&['failed','canceled','needs_attention'].includes(job?.status)){
+        current.editNotice=job.status==='canceled'?'本次修改已取消。':'修改未完成，请在发布微服务中核对任务。';current.editReceipt=null;
+      } else if(receipt&&!['ready','queued_update','downloading_update','updating'].includes(draft.phase)){
+        current.editNotice='修改任务尚未核验成功，请查看草稿处理状态。';
+      }
+      if(current.editReceipt&&Date.now()-current.editReceipt.submittedAt>30*60_000){
+        current.editReceipt=null;current.editNotice='请刷新查看微服务处理结果。';
+      }
+      if(['queued_update','downloading_update','updating'].includes(draft.phase)||current.editReceipt&&draft.phase==='ready'&&draft.contentVersion<current.editReceipt.contentVersion){
+        current.poll=setTimeout(()=>{if(xhsDetailCurrent(current,version))void getXhsDetail(current,++xhsDetailRequestVersion);},5000);
+      }
+      const row=state.xhs?.officialDrafts?.find(r=>r.key===current.id&&r.accountId===current.accountId);
+      if(row&&(row.title!==draft.title||row.phase!==draft.phase||row.platformStatus!==draft.platformStatus||row.updatedAt!==draft.updatedAt)){
+        Object.assign(row,{title:draft.title,phase:draft.phase,platformStatus:draft.platformStatus,imageCount:draft.imageCount,updatedAt:draft.updatedAt});
+        replaceXhsRegion('#xhs-official-drafts-region',publisherDraftsView());
+      }
     }
-  }catch(error){if(xhsDetailCurrent(current,version)){current.loading=false;current.waiting=false;current.error=error.message;updateXhsDetail();}}
+    updateXhsDetail();
+  }catch(error){if(xhsDetailCurrent(current,version)){current.loading=false;current.error=error.message;updateXhsDetail();}}
 }
-async function readXhsDetail() {
-  const current=state.xhsDetail;if(!current||current.kind==='submission'||current.accountId!==xhsAccountId()||xhsWorking()||!xhsConnected())return;
-  const version=++xhsDetailRequestVersion,loadVersion=++xhsLoadVersion;clearTimeout(xhsPollTimer);
-  state.xhsBusy='content-read';current.loading=true;current.error='';updateXhs();
-  try{
-    const result=await api(xhsDetailPath(current),{method:'POST',body:{accountId:current.accountId,profileId:current.profileId}});if(xhsDetailCurrent(current,version))acceptXhs(result);
-    if(xhsDetailCurrent(current,version)){current.loading=false;current.waiting=true;}
-  }catch(error){if(xhsDetailCurrent(current,version)){current.loading=false;current.waiting=false;current.error=error.message;}}
-  finally{if(loadVersion===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
-  if(xhsDetailCurrent(current,version)&&current.waiting&&!xhsWorking())await finishXhsDetailRead();
-}
-async function finishXhsDetailRead() {
-  const current=state.xhsDetail;if(!current?.waiting||current.loading||xhsWorking()||current.accountId!==xhsAccountId())return;
-  current.loading=true;updateXhsDetail();
-  await getXhsDetail(current,xhsDetailRequestVersion);
-  if(state.xhsDetail===current&&!current.detail&&!current.error){current.error='本次未读取到内容，请在官方窗口处理登录或验证后重试。';updateXhsDetail();}
-}
-async function syncXhsOfficialDrafts() {
-  if(xhsWorking()||!xhsConnected())return;
-  const accountId=xhsAccountId(),profileId=xhsProfileId(),version=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='official-drafts';state.xhsError='';updateXhs();
-  try{const result=await api('/api/xhs/official-drafts/sync',{method:'POST',body:{accountId,profileId}});if(version===xhsLoadVersion)acceptXhs(result);}
-  catch(error){if(version===xhsLoadVersion){state.xhsError=error.message;notify(error.message,true);}}
+async function syncXhsOfficialDrafts(offset=0) {
+  if(xhsWorking()||!xhsDeliveryAccountOpen())return;
+  const accountId=xhsAccountId(),version=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='official-drafts';state.xhsError='';updateXhs();
+  const current=()=>version===xhsLoadVersion&&state.view==='xhs'&&state.xhsRoute.accountId===accountId;
+  try{const result=await api('/api/xhs/official-drafts/sync',{method:'POST',body:{accountId,offset,limit:50}});if(current())acceptXhs(result,accountId);}
+  catch(error){if(current()){state.xhsError=error.message;notify(error.message,true);}}
   finally{if(version===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
 }
-async function openXhsOfficialDraft(id) {
-  if(xhsWorking()||!xhsConnected()||!(state.xhs.officialDrafts||[]).some(draft=>draft.key===id&&(!draft.accountId||draft.accountId===xhsAccountId())))return;
-  const accountId=xhsAccountId(),profileId=xhsProfileId(),version=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='official-open';state.xhsError='';updateXhs();
-  try{const result=await api(`/api/xhs/official-drafts/${encodeURIComponent(id)}/open`,{method:'POST',body:{accountId,profileId}});if(version===xhsLoadVersion)acceptXhs(result);notify('已打开官方草稿页面，请在官网继续编辑。');}
-  catch(error){if(version===xhsLoadVersion){state.xhsError=error.message;notify(error.message,true);}}
-  finally{if(version===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
-}
-function acceptXhs(payload) {
+function acceptXhs(payload,accountId=xhsAccountId(),defaultRead=false) {
   const snapshot=payload?.snapshot||payload;
   if(!snapshot?.connection||!snapshot?.status||!Array.isArray(snapshot.drafts))throw new Error('小红书工作台数据不完整，请重新读取。');
-  const oldId=xhsAccountId(),oldProfile=xhsProfileId(),newId=String(snapshot.account?.id||'');state.xhs=snapshot;
-  if(state.xhsSection==='auto')state.xhsSection='overview';
-  if(!xhsAccounts().length&&!snapshot.account&&!state.xhsProjectId)state.xhsSection='overview';
-  if(oldProfile!==xhsProfileId()||oldId!==newId){
-    const keepLocalPreview=state.xhsPreview&&!state.xhsPreview.accountId&&!oldId&&(!oldProfile||oldProfile===xhsProfileId());
-    closeXhsDetail({restoreFocus:false});state.xhsNoteSearch='';state.xhsDraftSearch='';state.xhsDraftSource='official';
-    if(!keepLocalPreview){
-      state.xhsTab=state.xhsLocation.tabs[xhsProfileId()]||'analytics';state.xhsComposerOpen=false;
-      if(oldId||oldProfile){++xhsDraftRequestVersion;state.xhsProjectId='';state.xhsPreview=null;state.xhsError='';}
-    }
+  if(snapshot.provider!=='publisher')throw new Error('当前后端尚未接入小红书发布服务，请更新并重启工作台。');
+  if(!defaultRead&&(!accountId||snapshot.account?.id!==accountId))throw new Error('草稿工作台回执与所选账号不一致。');
+  const updateDefault=defaultRead||accountId===state.xhsDefault?.account?.id;
+  const previous=updateDefault?state.xhsDefault:state.xhsScoped;
+  if(previous&&(previous.providerKey!==snapshot.providerKey||previous.account?.id!==snapshot.account?.id)){
+    state.xhsPublished=null;
+    closeXhsDetail({restoreFocus:false});
+    ++xhsDraftRequestVersion;state.xhsBusy='';state.xhsProjectId='';state.xhsPreview=null;
+    state.xhsDraftSearch='';state.xhsDraftSource='official';state.xhsComposerOpen=false;
   }
-  if(state.xhsPreview&&!state.xhsPreview.accountId&&newId)state.xhsPreview.accountId=newId;
-  if(!state.guide.creation&&state.guide.xhsAutoDelivery&&state.guide.xhsTargetAccountId===null&&newId){state.guide.xhsTargetAccountId=newId;saveGuidance();}
+  if(updateDefault){
+    if(previous?.providerKey!==snapshot.providerKey)state.xhsScoped=null;
+    state.xhsDefault=snapshot;
+  }else state.xhsScoped=snapshot;
+  if(state.xhsPreview&&!state.xhsPreview.accountId)state.xhsPreview.accountId=xhsAccountId();
+  if(updateDefault&&(snapshot.deliveryConfiguration?.configured===false||!snapshot.account?.id&&!state.guide.creation)&&state.guide.xhsAutoDelivery){state.guide.xhsAutoDelivery=false;saveGuidance();}
   return snapshot;
 }
 function updateXhsComposerState() {
@@ -1365,9 +1439,10 @@ function updateXhsComposerState() {
   if(!preview)return;
   const titleLength=Array.from(preview.title).length,contentLength=Array.from(preview.content).length,existing=xhsExistingDraft(),previous=(state.xhs?.drafts||[]).find(draft=>draft.projectId===state.xhsProjectId&&draft.accountId===xhsAccountId());
   [['#xhs-title-count',titleLength,20],['#xhs-content-count',contentLength,1000]].forEach(([selector,count,max])=>{const el=form.querySelector(selector);if(el){el.textContent=`${count} / ${max}`;el.classList.toggle('is-error',count>max);}});
-  const valid=xhsBound()&&preview.accountId===xhsAccountId()&&preview.title.trim()&&titleLength<=20&&contentLength<=1000&&!xhsWorking()&&!existing;
-  const button=form.querySelector('#xhs-submit-draft');if(button){button.disabled=!valid;button.innerHTML=state.xhsBusy==='draft'?'<span class="spinner spinner-small"></span>'+(!xhsConnected()?'正在检查绑定账号':'正在准备'):existing?'这份作品已有待核验草稿':icon('arrow')+(!xhsConnected()&&xhsBound()?'检查登录并送入草稿':previous?.status==='verified'?'准备当前版本的电脑草稿':'确认送入电脑草稿');}
-  const note=form.querySelector('#xhs-submit-notice');if(note){note.textContent=existing?`这份作品${XHS_DRAFT_LABELS[existing.status]||'已有草稿记录'}，请打开电脑草稿核对，避免重复送出。`:titleLength>20||contentLength>1000?xhsCopyProblem(preview.title,preview.content):!xhsBound()?'首次使用请先扫码绑定小红书账号。':!preview.title.trim()?'请填写小红书标题。':!xhsConnected()?'账号已绑定。本次点击将自动检查保存的登录状态，通过后送稿；需要重新登录时会提示。':previous?.status==='verified'?'已有电脑草稿已核验。相同内容会复用记录；调整标题、正文或图片后会另存新版，原草稿不会被覆盖。':previous?.status==='failed'?'这份作品有未完成的草稿记录。同一版本请在下方查看原因或重新准备；修改内容可另存新版。':'';note.classList.toggle('is-error',titleLength>20||contentLength>1000);note.hidden=!note.textContent;}
+  const problem=draftCopyProblem(preview.title,preview.content);
+  const valid=xhsBound()&&preview.accountId===xhsAccountId()&&preview.title.trim()&&!problem&&!xhsWorking()&&!existing;
+  const button=form.querySelector('#xhs-submit-draft');if(button){button.disabled=!valid;button.innerHTML=state.xhsBusy==='draft'?'<span class="spinner spinner-small"></span>'+(!xhsConnected()?'正在检查服务':'正在准备'):existing?'这份作品已有待核验草稿':icon('arrow')+(!xhsConnected()&&xhsBound()?'检查服务并送稿':previous?.status==='verified'?'准备当前版本的电脑草稿':'确认送入电脑草稿');}
+  const note=form.querySelector('#xhs-submit-notice');if(note){note.textContent=existing?`这份作品${XHS_DRAFT_LABELS[existing.status]||'已有草稿记录'}，请查看送稿记录。`:problem||(!xhsBound()?xhsAccountSetupHint():!preview.title.trim()?'请填写小红书标题。':!xhsConnected()?'送稿前会检查发布服务是否就绪。':previous?.status==='verified'?'已有电脑草稿已核验。相同内容会复用记录；调整标题、正文或图片后会另存新版，原草稿不会被覆盖。':previous?.status==='failed'?'这份作品有未完成的草稿记录。同一版本请在下方查看原因或重新准备；修改内容可另存新版。':'');note.classList.toggle('is-error',Boolean(problem));note.hidden=!note.textContent;}
 }
 function updateXhs() {
   if(state.view==='briefing'){updateGuideXhs();return;}
@@ -1375,25 +1450,20 @@ function updateXhs() {
   const page=document.querySelector('#xhs-page'),management=page?.querySelector('#xhs-management-region');
   if(!page||!management||!state.xhs){render();return;}
   const active=document.activeElement,focus=active?.closest('#xhs-management-region')?{id:active.id,action:active.dataset.action,profileId:active.dataset.profileId,kind:active.dataset.kind,itemId:active.dataset.id,tab:active.dataset.tab,source:active.dataset.source,start:active.selectionStart,end:active.selectionEnd}:null;
-  const menuOpen=Boolean(page.querySelector('.xhs-more-menu[open]'));
-  const scrolls=[...page.querySelectorAll('.xhs-accounts-table-wrap,.xhs-content-table-wrap,.xhs-notes-table-wrap')].map(el=>({name:el.className,top:el.scrollTop,left:el.scrollLeft}));
-  const structural=management.dataset.section!==state.xhsSection||management.dataset.profileId!==xhsProfileId();
+  const scrollElement=page.querySelector('.xhs-content-table-wrap'),scrollTop=scrollElement?.scrollTop,scrollLeft=scrollElement?.scrollLeft;
   const replace=replaceXhsRegion;
-  if(structural){management.innerHTML=xhsManagementView();management.dataset.section=state.xhsSection;management.dataset.profileId=xhsProfileId();}
-  replace('#xhs-status-region',xhsStatusView());
-  if(state.xhsSection==='overview'){
-    replace('#xhs-overview-results',xhsAccountsResultsView());
-    const refresh=page.querySelector('.xhs-overview-toolbar [data-action="xhs-reload"]');if(refresh)refresh.disabled=Boolean(state.xhsAccountBusy||state.xhsLoading);
+  const draftPanel=state.xhsRoute.tab==='drafts'&&xhsDeliveryAccountOpen(),screen=xhsScreenKey();
+  if(management.dataset.screen!==screen||!draftPanel){
+    replace('#xhs-management-region',xhsManagementView());management.dataset.screen=screen;
   }
-  else {
+  replace('#xhs-status-region',xhsStatusView());
+  if(draftPanel){
     const select=page.querySelector('#xhs-project'),priorSelection=select?.value||'',available=state.projects.filter(xhsEligible);
     if(state.xhsProjectId&&!available.some(project=>project.id===state.xhsProjectId)){state.xhsProjectId='';state.xhsPreview=null;}
     replace('#xhs-account-region',xhsAccountView());
-    replace('.xhs-tabs',xhsTabsView());
-    replace('#xhs-metrics-region',xhsMetricsView());
-    replace('#xhs-notes-region',xhsNotesView());
+    replace('#xhs-connection-region',xhsDraftConnectionView());
     replace('#xhs-drafts-region',xhsDraftsView());
-    replace('#xhs-official-drafts-region',xhsOfficialDraftsView());
+    replace('#xhs-official-drafts-region',publisherDraftsView());
     replace('#xhs-draft-refresh',xhsDraftRefreshView());
     replace('.xhs-draft-source',xhsDraftSourceView());
     if(priorSelection!==state.xhsProjectId||!select)replace('#xhs-composer-region',xhsComposerView());
@@ -1401,19 +1471,12 @@ function updateXhs() {
       const options='<option value="">选择一份图文…</option>'+available.map(project=>`<option value="${h(project.id)}" ${state.xhsProjectId===project.id?'selected':''}>${h(project.title||'未命名作品')}</option>`).join('');
       if(select._xhsOptions!==options){select.innerHTML=options;select.value=state.xhsProjectId;select._xhsOptions=options;}
     }
-    if(menuOpen&&!structural){const menu=page.querySelector('.xhs-more-menu');if(menu)menu.open=true;}
-    for(const id of ['analytics','published','drafts']){const panel=page.querySelector('#xhs-panel-'+id);if(panel)panel.hidden=state.xhsTab!==id;}
     const official=page.querySelector('#xhs-official-drafts-region'),submissions=page.querySelector('#xhs-submissions-region');
     if(official)official.hidden=state.xhsDraftSource!=='official';if(submissions)submissions.hidden=state.xhsDraftSource!=='submissions';
-    const time=page.querySelector('#xhs-sync-time');if(time)time.textContent='数据更新 '+xhsDate(state.xhs.sync?.lastSyncAt);
-    const count=page.querySelector('#xhs-notes-count');if(count)count.textContent=`${(state.xhs.notes||[]).filter(note=>!note.accountId||note.accountId===xhsAccountId()).length} 篇已读取`;
-    const target=page.querySelector('#xhs-preview-target');if(target)target.textContent=xhsBound()?`目标账号：${state.xhs.account.nickname||state.xhs.account.id}${xhsConnected()?'':' · 送稿时自动检查登录'}`:'请先扫码绑定小红书账号';
-    const coverage=page.querySelector('#xhs-notes-coverage');if(coverage)coverage.textContent=xhsNotesCoverage();
-    page.querySelectorAll('#xhs-panel-analytics [data-kind="sync"],.xhs-note-toolbar [data-kind="sync"]').forEach(button=>{button.disabled=xhsWorking()||!xhsConnected();});
-    const search=page.querySelector('#xhs-note-search');if(search&&search.value!==state.xhsNoteSearch)search.value=state.xhsNoteSearch;
+    const target=page.querySelector('#xhs-preview-target');if(target)target.textContent=xhsBound()?`目标账号：${state.xhs.account.nickname||state.xhs.account.id}${xhsConnected()?'':' · '+xhsAvailabilityHint}`:xhsAccountSetupHint();
     const draftSearch=page.querySelector('#xhs-draft-search');if(draftSearch&&draftSearch.value!==state.xhsDraftSearch)draftSearch.value=state.xhsDraftSearch;
   }
-  for(const scroll of scrolls){const element=[...page.querySelectorAll('.xhs-accounts-table-wrap,.xhs-content-table-wrap,.xhs-notes-table-wrap')].find(el=>el.className===scroll.name);if(element){element.scrollTop=scroll.top;element.scrollLeft=scroll.left;}}
+  const table=page.querySelector('.xhs-content-table-wrap');if(table&&scrollElement){table.scrollTop=scrollTop;table.scrollLeft=scrollLeft;}
   if(focus&&!active.isConnected){
     const next=focus.id?document.getElementById(focus.id):[...management.querySelectorAll('[data-action]')].find(el=>el.dataset.action===focus.action&&el.dataset.profileId===focus.profileId&&el.dataset.kind===focus.kind&&el.dataset.id===focus.itemId&&el.dataset.tab===focus.tab&&el.dataset.source===focus.source);
     if(next&&!next.disabled){next.focus({preventScroll:true});if(typeof focus.start==='number'&&typeof next.setSelectionRange==='function')try{next.setSelectionRange(focus.start,focus.end);}catch{}}
@@ -1422,110 +1485,217 @@ function updateXhs() {
 }
 function scheduleXhsPoll() {
   clearTimeout(xhsPollTimer);
-  if(['xhs','briefing'].includes(state.view)&&(xhsWorking()||xhsAccounts().some(record=>record.busy)||state.xhsDetail?.waiting||(state.xhs?.drafts||[]).some(draft=>draft.accountId===xhsAccountId()&&['queued','running'].includes(draft.status))))xhsPollTimer=setTimeout(()=>loadXhs({quiet:true}),2000);
+  if(['xhs','briefing'].includes(state.view)&&(xhsWorking()||(state.xhs?.drafts||[]).some(draft=>draft.accountId===xhsAccountId()&&['queued','running'].includes(draft.status))))xhsPollTimer=setTimeout(()=>loadXhs({quiet:true}),5000);
 }
-async function loadXhs({quiet=false,refreshProjects=false}={}) {
-  const version=++xhsLoadVersion;state.xhsLoading=true;if(!quiet&&!state.xhs&&state.view==='xhs')render();
+async function loadXhsAccounts() {
+  const version=++xhsAccountsVersion;state.xhsAccountsLoading=true;
+  updateXhs();
   try{
-    const snapshot=await api('/api/xhs');if(version!==xhsLoadVersion)return;
-    const first=!state.xhs;state.xhsError='';acceptXhs(snapshot);
-    if(refreshProjects){const result=await api('/api/projects');if(version!==xhsLoadVersion)return;state.projects=result.projects||state.projects;}
+    const payload=await api('/api/xhs/accounts?includeMetrics=1');
+    if(version!==xhsAccountsVersion)return;
+    if(!Array.isArray(payload.accounts))throw new Error('账号列表格式无效。');
+    state.xhsAccounts=payload.accounts;state.xhsFetchedAt=payload.fetchedAt;state.xhsAccountsError='';
+  }catch(error){
+    if(version!==xhsAccountsVersion)return;
+    state.xhsAccounts=null;state.xhsAccountsError=error.message;
+  }finally{if(version===xhsAccountsVersion){state.xhsAccountsLoading=false;updateXhs();}}
+}
+async function loadXhsWorkspace() {
+  await loadXhs({quiet:Boolean(state.xhs),refreshProjects:true,accountId:''});
+  if(state.view!=='xhs')return;
+  if(!state.xhs?.configured){
+    ++xhsAccountsVersion;state.xhsAccounts=null;state.xhsAccountsLoading=false;state.xhsAccountsError='';state.xhsFetchedAt=null;
+    updateXhs();return;
+  }
+  await loadXhsAccounts();
+  await loadOpenXhsTab(true);
+}
+function notesOpen(id) {
+  return state.view==='xhs' && state.xhsRoute.accountId===id && state.xhsRoute.tab==='published';
+}
+function pollNotes(id, task) {
+  clearTimeout(noteSyncTimer);
+  if(notesOpen(id) && notesPending(task.job?.status) && !task.error) {
+    noteSyncTimer=setTimeout(()=>{ if(notesOpen(id))void runNotesSync(id,false); },4000);
+  }
+}
+async function runNotesSync(id, start) {
+  if(!notesOpen(id))return;
+  const task=notesTask(id);
+  if(task.busy)return;
+  const jobId=notesPending(task.job?.status)?task.job.jobId:null;
+  if(!jobId && !start)return;
+  clearTimeout(noteSyncTimer);
+  task.busy=true;task.error='';updateXhs();
+  try {
+    const endpoint='/api/xhs/accounts/'+encodeURIComponent(id)+'/notes/sync';
+    if(!jobId&&!task.requestId)rememberNotesRequest(task,crypto.randomUUID());
+    const result=jobId?await api(endpoint+'/'+encodeURIComponent(jobId)):await api(endpoint,{method:'POST',body:{requestId:task.requestId}});
+    const job=result?.job;
+    if(job?.accountId!==id||job.action!=='sync_notes'||!job.jobId||(jobId&&job.jobId!==jobId))throw Error('笔记同步回执与所选账号或任务不一致。');
+    task.job=job;
+    rememberNotesRequest(task,null);
+    if(notesOpen(id)&&!notesPending(job.status))await loadXhsPublished(0);
+  } catch(error) {
+    task.error=error.message;
+  } finally {
+    task.busy=false;
+    if(notesOpen(id)){updateXhs();pollNotes(id,task);}
+  }
+}
+async function loadXhsPublished(offset=0) {
+  const row=xhsSelectedAccount();
+  if(!row||!notesOpen(row.accountId)||!Number.isSafeInteger(offset)||offset<0)return;
+  const request={offset,loading:true,data:state.xhsPublished?.data};
+  state.xhsPublished=request;updateXhs();
+  try {
+    const data=await api(`/api/xhs/accounts/${encodeURIComponent(row.accountId)}/notes?offset=${offset}`);
+    if(state.xhsPublished!==request)return;
+    if(!Array.isArray(data.items)||!Number.isSafeInteger(data.total)||data.total<0||!Number.isSafeInteger(data.limit)||data.limit<1||data.offset!==offset)throw new Error('笔记列表格式无效。');
+    if(offset>0&&offset>=data.total)return loadXhsPublished(Math.max(0,Math.floor((data.total-1)/data.limit)*data.limit));
+    if(offset>0&&request.data?.lastSyncedAt&&data.lastSyncedAt!==request.data.lastSyncedAt)return loadXhsPublished(0);
+    const task=notesTask(row.accountId);
+    if(!task.busy && !notesPending(task.job?.status))task.job=data.sync || null;
+    state.xhsPublished={offset,data};
+    pollNotes(row.accountId,task);
+  } catch(error) {
+    if(state.xhsPublished!==request)return;
+    state.xhsPublished={offset,data:request.data,error:error.message};
+  }
+  updateXhs();
+}
+async function loadOpenXhsTab(refresh=false) {
+  const route=state.xhsRoute;
+  if(state.view!=='xhs'||!xhsSelectedAccount())return;
+  if(route.accountId!==state.xhsDefault?.account?.id&&(!xhsDeliveryAccountOpen()||refresh)){
+    await loadXhs({quiet:true,accountId:route.accountId});
+    if(state.view!=='xhs'||state.xhsRoute!==route)return;
+  }
+  if(state.xhsRoute.tab==='overview')return accountMetricsView.show(xhsSelectedAccount(),accountMetricsView.currentPeriod(),refresh);
+  if(state.xhsRoute.tab==='published'){
+    const current=state.xhsPublished;
+    if(!current||refresh&&!current.loading)return loadXhsPublished(current?.offset??0);
+    return;
+  }
+  return loadOpenXhsDrafts();
+}
+async function loadOpenXhsDrafts() {
+  if(state.view==='xhs'&&state.xhsRoute.tab==='drafts'&&state.xhsDraftSource==='official'&&xhsDeliveryAccountOpen()&&!state.xhs?.officialDraftSync?.lastSyncAt&&!state.xhs?.officialDraftSync?.error)await syncXhsOfficialDrafts();
+}
+function applyXhsRoute(route) {
+  const previous=state.xhsRoute;
+  if(previous.accountId===route.accountId&&previous.tab===route.tab)return false;
+  accountMetricsView.reset();
+  state.xhsPublished=null;
+  if(state.xhsDetail)closeXhsDetail({restoreFocus:false});
+  if(previous.accountId!==route.accountId){
+    resetXhsAccountActivity();
+    state.xhsDraftSearch='';state.xhsDraftSource='official';state.xhsComposerOpen=false;state.xhsProjectId='';state.xhsPreview=null;
+  }
+  state.xhsRoute=route;
+  return true;
+}
+function resetXhsAccountActivity() {
+  accountMetricsView.reset();
+  ++xhsLoadVersion;++xhsReadVersion;++xhsDraftRequestVersion;clearTimeout(xhsPollTimer);
+  state.xhsScoped=null;state.xhsBusy='';state.xhsLoading=false;state.xhsError='';
+}
+function setXhsRoute(route,publish=true) {
+  if(!applyXhsRoute(route))return;
+  if(publish){
+    if(EMBEDDED_MODE)postEmbeddedMessage({type:'content-studio:xhs-route',view:'xhs',...route});
+    else{
+      const url=new URL(location.href);url.searchParams.set('view','xhs');
+      if(route.accountId){url.searchParams.set('accountId',route.accountId);url.searchParams.set('tab',route.tab);}
+      else{url.searchParams.delete('accountId');url.searchParams.delete('tab');}
+      window.history.pushState({},'',url);
+    }
+  }
+  updateXhs();
+  void loadOpenXhsTab();
+}
+window.addEventListener('popstate',()=>{
+  if(EMBEDDED_MODE)return;
+  const view=new URLSearchParams(location.search).get('view')||'briefing';
+  if(view==='xhs'&&state.view==='xhs')setXhsRoute(readXhsRoute(),false);
+  else if(state.view!==view)void navigateFromEmbeddedParent(view,view==='xhs'?readXhsRoute():null);
+});
+async function loadXhs({quiet=false,refreshProjects=false,accountId=state.view==='xhs'&&xhsSelectedAccount()?.accountId||''}={}) {
+  const version=++xhsReadVersion,operation=xhsLoadVersion,busy=state.xhsBusy;
+  const current=()=>version===xhsReadVersion&&operation===xhsLoadVersion&&(!busy||busy===state.xhsBusy)
+    &&(!accountId||state.view==='xhs'&&state.xhsRoute.accountId===accountId);
+  state.xhsLoading=true;if(!quiet&&!state.xhs&&state.view==='xhs')render();
+  try{
+    const snapshot=await api(accountId?'/api/xhs?accountId='+encodeURIComponent(accountId):'/api/xhs');if(!current())return;
+    const first=!state.xhs;state.xhsError='';acceptXhs(snapshot,accountId,!accountId);
+    if(refreshProjects){const result=await api('/api/projects');if(!current())return;state.projects=result.projects||state.projects;}
     if(state.view==='xhs'){if(first){render();updateXhsComposerState();}else updateXhs();}else if(state.view==='briefing')updateGuideXhs();
-    if(state.xhsDetail?.waiting&&!xhsWorking())await finishXhsDetailRead();
-  }catch(error){if(version===xhsLoadVersion){state.xhsError=error.message;if(state.view==='xhs'){if(state.xhs)updateXhs();else render();}else if(state.view==='briefing')updateGuideXhs();}}
-  finally{if(version===xhsLoadVersion){state.xhsLoading=false;if(state.view==='xhs'&&state.xhs)updateXhs();scheduleXhsPoll();}}
+  }catch(error){if(current()){state.xhsError=error.message;if(state.view==='xhs'){if(state.xhs)updateXhs();else render();}else if(state.view==='briefing')updateGuideXhs();}}
+  finally{if(version===xhsReadVersion){state.xhsLoading=false;if(state.view==='xhs'&&state.xhs)updateXhs();scheduleXhsPoll();}}
 }
 function chooseXhsProject(id) {
   ++xhsDraftRequestVersion;
   const p=state.projects.find(project=>project.id===id&&xhsEligible(project));state.xhsProjectId=p?.id||'';state.xhsPreview=p?{title:p.title||'',content:p.caption||'',accountId:xhsAccountId()}:null;
   replaceXhsRegion('#xhs-composer-region',xhsComposerView());updateXhsComposerState();
 }
-async function openXhsForProject(id,accountId) {
-  ++xhsDraftRequestVersion;
-  const p=state.projects.find(project=>project.id===id)||state.guideProject;if(!p||p.id!==id||!xhsEligible(p))return notify('请等文案和全部图片完成后，再准备小红书草稿。',true);
-  if(accountId&&accountId!==xhsAccountId()){
-    const target=xhsAccountRecord(accountId);
-    if(target?.profileId)await selectXhsAccount(target.profileId,{tab:'drafts'});
-    if(accountId!==xhsAccountId())return notify('请重新绑定目标账号后再编辑这份送稿。',true);
-  }
-  state.xhsSection='detail';state.xhsTab='drafts';state.xhsComposerOpen=true;state.xhsProjectId=id;state.xhsPreview={title:p.title||'',content:p.caption||'',accountId:xhsAccountId()};rememberXhsLocation();state.view='xhs';const url=new URL(location.href);url.searchParams.set('view','xhs');window.history.replaceState({},'',url);render();updateXhsComposerState();await loadXhs({quiet:true,refreshProjects:true});state.xhsSection='detail';state.xhsTab='drafts';state.xhsComposerOpen=true;rememberXhsLocation();updateXhs();const disclosure=document.querySelector('#xhs-composer-disclosure');if(disclosure)disclosure.open=true;document.querySelector('#xhs-composer-region')?.scrollIntoView({behavior:'smooth',block:'start'});
+async function openXhsForProject(id,accountId='') {
+  if(document.querySelector('#xhs-publish-dialog'))return;
+  const {project}=await api('/api/projects/'+encodeURIComponent(id));
+  if(project?.id!==id||!xhsEligible(project))return notify('请等文案和全部图片完成后，再准备小红书草稿。',true);
+  await openXhsPublishDialog(project,{api,h,initialAccountId:accountId});
 }
-async function runXhsAction(kind,{accountId='',profileId=''}={}) {
-  if(!['login','check','sync','open-drafts','disconnect'].includes(kind)||state.xhsAccountBusy)return;
-  const target=accountId?xhsAccountRecord(accountId):null;
-  if(accountId&&!target)return notify('目标账号已移除，请在账号管理中重新绑定。',true);
-  const targetProfile=profileId||target?.profileId||xhsProfileId(),selected=targetProfile===xhsProfileId();
-  if(selected?xhsWorking():target?.busy)return;
-  const version=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy=kind;state.xhsError='';updateXhs();
-  const body={...(targetProfile?{profileId:targetProfile}:{}),...(accountId?{accountId}:{}),...(kind==='sync'?{noteLimit:state.xhsNoteLimit}:{})};
-  try{const result=await api(`/api/xhs/${kind}`,{method:'POST',body});if(version!==xhsLoadVersion)return;acceptXhs(result);if(kind==='disconnect'){state.xhsProjectId='';state.xhsPreview=null;notify('已关闭该账号的浏览器连接，账号和原稿保留。');}else if(kind==='login')notify('请在打开的官方浏览器中登录，完成后点击「检查连接」。');}
-  catch(error){if(version===xhsLoadVersion){state.xhsError=error.message;notify(error.message,true);}}
-  finally{if(version===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
-}
-async function checkBoundXhsForDraft(accountId,isCurrent) {
-  if(!isCurrent())return false;
-  const result=await api('/api/xhs/check',{method:'POST',body:{accountId,profileId:xhsProfileId()}});if(!isCurrent())return false;acceptXhs(result);
-  const deadline=Date.now()+45000;
-  for(;;){
-    if(!isCurrent())return false;
-    if(!xhsBound()||xhsAccountId()!==accountId)throw new Error('绑定账号已变化，本次没有送稿。请重新选择作品并确认账号。');
-    updateXhs();
-    if(!state.xhs?.status?.busy){
-      if(xhsConnected())return true;
-      throw new Error(state.xhs?.connection?.message||'保存的登录状态需要重新验证，请扫码登录后再次送稿。');
+async function checkXhsPublisher() {
+  if(!xhsBound()||xhsWorking())return;
+  const accountId=xhsAccountId(),version=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='check';state.xhsError='';updateXhs();
+  try{
+    const result=await api('/api/xhs/check',{method:'POST',body:{accountId}});
+    if(version===xhsLoadVersion&&accountId===xhsAccountId()){acceptXhs(result,accountId);notify(state.xhs.connection.message||'已检查发布服务。',!xhsConnected());}
+  }catch(error){
+    if(version===xhsLoadVersion&&accountId===xhsAccountId()){
+      state.xhsError=error.message;notify(error.message,true);
+      try{const snapshot=await api('/api/xhs?accountId='+encodeURIComponent(accountId));if(version===xhsLoadVersion&&accountId===xhsAccountId())acceptXhs(snapshot,accountId);}catch{}
     }
-    if(Date.now()>=deadline)throw new Error('登录检查仍在处理中，本次没有送稿。完成后可再次点击送稿。');
-    await new Promise(resolve=>setTimeout(resolve,750));
-    if(!isCurrent())return false;
-    const snapshot=await api('/api/xhs');
-    if(!isCurrent())return false;
-    acceptXhs(snapshot);
-  }
+  }finally{if(version===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
 }
 async function submitXhsDraft() {
+  if(xhsDeliveryReadOnly())return notify(xhsDeliverySetupHint(),true);
   const preview=state.xhsPreview,p=state.projects.find(project=>project.id===state.xhsProjectId);if(!preview||!xhsEligible(p)||xhsWorking())return;
-  if(!xhsBound()||preview.accountId!==xhsAccountId())return notify('账号绑定已变化，请重新选择作品并核对目标账号。',true);
-  if(!preview.title.trim()||Array.from(preview.title).length>20||Array.from(preview.content).length>1000)return updateXhsComposerState();
-  if(xhsExistingDraft())return notify('这份作品已有草稿记录，请先打开电脑草稿核对。',true);
+  if(!xhsBound()||preview.accountId!==xhsAccountId())return notify('服务账号已变化，请重新选择作品并核对目标账号。',true);
+  if(!preview.title.trim()||draftCopyProblem(preview.title,preview.content))return updateXhsComposerState();
+  if(xhsExistingDraft())return notify('请先在送稿记录中核对此次任务。',true);
   const body={projectId:p.id,accountId:preview.accountId,title:preview.title,content:preview.content};
   const operation=++xhsDraftRequestVersion;
   const isCurrent=()=>operation===xhsDraftRequestVersion&&state.view==='xhs'&&state.xhsProjectId===p.id&&state.xhsPreview===preview&&preview.accountId===body.accountId&&preview.title===body.title&&preview.content===body.content;
-  ++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='draft';state.xhsError='';updateXhs();
+  const request=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='draft';state.xhsError='';updateXhs();
   try{
-    if(!xhsConnected()){
-      if(!await checkBoundXhsForDraft(body.accountId,isCurrent))return;
-      if(!isCurrent())return;
-      const {project:current}=await api(`/api/projects/${encodeURIComponent(p.id)}`);
-      if(!isCurrent())return;
-      if(!xhsEligible(current)||current.title!==p.title||current.caption!==p.caption||JSON.stringify(current.pages.map(page=>page.imageUrl))!==JSON.stringify(p.pages.map(page=>page.imageUrl)))throw new Error('检查期间原作品已更新，本次没有送稿。请重新选择作品并确认最新内容。');
-    }
-    if(!isCurrent())return;
-    if(!xhsConnected()||xhsAccountId()!==body.accountId||state.xhs?.status?.busy||xhsExistingDraft(p.id))throw new Error('账号或草稿状态已变化，本次没有送稿，请重新核对。');
-    const result=await api('/api/xhs/drafts',{method:'POST',body});if(!isCurrent())return;acceptXhs(result);const status=result.draft?.status;notify(status==='verified'?'电脑草稿已核验。':status==='failed'?'这份草稿尚未准备完成，请查看下方原因。':['unknown','filled','interrupted'].includes(status)?'上次保存结果仍需核对，请打开电脑草稿检查。':'草稿任务已提交，可在下方查看处理结果。',['failed','unknown','interrupted'].includes(status));
+    if(xhsAccountId()!==body.accountId||state.xhs?.status?.busy||xhsExistingDraft(p.id))throw new Error('账号或草稿状态已变化，本次没有送稿，请重新核对。');
+    const result=await api('/api/xhs/drafts',{method:'POST',body});if(!isCurrent())return;acceptXhs(result);const status=result.draft?.status;state.xhsDraftSource='submissions';notify(status==='verified'?'电脑草稿已核验。':status==='failed'?'这份草稿尚未准备完成，请查看下方原因。':['unknown','filled','interrupted'].includes(status)?'上次保存结果仍需核对，请查看送稿记录。':'草稿任务已提交，可在下方查看处理结果。',['failed','unknown','interrupted'].includes(status));
   }
-  catch(error){state.xhsError=error.message;notify(error.message,true);if(error.status===409){const previousAccount=xhsAccountId();await loadXhs({quiet:true});if(previousAccount===xhsAccountId())state.xhsError=error.message;}}
-  finally{if(operation===xhsDraftRequestVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
+  catch(error){if(!isCurrent())return;state.xhsError=error.message;notify(error.message,true);if(error.status===409){await loadXhs({quiet:true});if(isCurrent())state.xhsError=error.message;}}
+  finally{if(request===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
 }
 async function retryXhsDraft(id) {
-  const draft=state.xhs?.drafts?.find(item=>item.id===id);if(!draft?.canRetry||!xhsConnected()||draft.accountId!==xhsAccountId()||xhsWorking())return;
+  if(xhsDeliveryReadOnly())return notify(xhsDeliverySetupHint(),true);
+  const draft=state.xhs?.drafts?.find(item=>item.id===id);if(!draft?.canRetry||draft.accountId!==xhsAccountId()||xhsWorking())return;
   const version=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='retry';state.xhsError='';updateXhs();
-  const accountId=draft.accountId,profileId=xhsProfileId();
-  try{const result=await api(`/api/xhs/drafts/${encodeURIComponent(id)}/retry`,{method:'POST',body:{accountId,profileId}});if(version===xhsLoadVersion)acceptXhs(result);notify('已重新准备这份草稿，可查看下方处理结果。');}
-  catch(error){state.xhsError=error.message;notify(error.message,true);if(error.status===409){const previousAccount=xhsAccountId();await loadXhs({quiet:true});if(previousAccount===xhsAccountId())state.xhsError=error.message;}}
+  const accountId=draft.accountId;
+  try{const result=await api(`/api/xhs/drafts/${encodeURIComponent(id)}/retry`,{method:'POST',body:{accountId}});if(version!==xhsLoadVersion||accountId!==xhsAccountId())return;acceptXhs(result,accountId);notify('请在送稿记录中查看最新处理结果。');}
+  catch(error){if(version!==xhsLoadVersion||accountId!==xhsAccountId())return;state.xhsError=error.message;notify(error.message,true);if(error.status===409)await loadXhs({quiet:true});}
   finally{if(version===xhsLoadVersion)state.xhsBusy='';updateXhs();scheduleXhsPoll();}
 }
 async function recheckXhsDraft(id,{fromGuide=false}={}) {
   const p=state.guideProject,delivery=p?.xhsDelivery;
   const draft=(state.xhs?.drafts||[]).find(item=>item.id===id)||(fromGuide&&delivery?.draftId===id?delivery:null);
   if(!id||!xhsCanRecheck(draft)||xhsWorking()||(fromGuide&&guideWorkActive()))return;
-  const record=xhsAccountRecord(draft.accountId);if(!xhsRecordConnected(record))return notify('请先检查原草稿账号的登录状态后再核验。',true);
+  if(draft.accountId!==xhsAccountId())return notify('目标账号与当前服务账号不一致。',true);
   const version=guideCreationVersion,projectId=p?.id,accountId=draft.accountId;
   const requestVersion=++xhsLoadVersion;clearTimeout(xhsPollTimer);state.xhsBusy='recheck';state.xhsError='';if(fromGuide)state.guideActionBusy='xhs-recheck';updateXhs();
+  const current=()=>requestVersion===xhsLoadVersion&&accountId===xhsAccountId();
   try{
-    const result=await api(`/api/xhs/drafts/${encodeURIComponent(id)}/recheck`,{method:'POST',body:{accountId}});if(requestVersion===xhsLoadVersion)acceptXhs(result);
+    const result=await api(`/api/xhs/drafts/${encodeURIComponent(id)}/recheck`,{method:'POST',body:{accountId}});if(!current())return;acceptXhs(result,accountId);
     if(fromGuide&&version===guideCreationVersion&&state.guide.creation?.projectId===projectId)await loadGuideProject({quiet:true});
-    notify(result.draft?.status==='verified'?'电脑草稿已重新核验。':'正在读取已有草稿进行核验，不会重新上传。');
-  }catch(error){state.xhsError=error.message;notify(error.message,true);if(error.status===409)await loadXhs({quiet:true});}
+    if(current())notify('已查询原任务，请查看最新状态。');
+  }catch(error){if(!current())return;state.xhsError=error.message;notify(error.message,true);if(error.status===409)await loadXhs({quiet:true});}
   finally{
     if(requestVersion===xhsLoadVersion)state.xhsBusy='';
     if(fromGuide&&version===guideCreationVersion){state.guideActionBusy='';renderGuidance({preserve:true});beginGuidePolling();}
@@ -1925,7 +2095,7 @@ function historyCoverView(project,{card=false}={}) {
 }
 function historyProjectActions(project,{card=false}={}) {
   const title=project.title||'未命名作品';
-  return `<div class="history-row-actions ${card?'is-card':''}"><button type="button" class="text-button history-continue-chat" data-action="continue-chat" data-id="${h(project.id)}">${isActive(project)?'查看进度':project.pages?.length?'继续对话':'查看并继续'}</button><button type="button" class="icon-button history-delete" data-action="delete" data-id="${h(project.id)}" aria-label="删除 ${h(title)}" title="删除作品" ${isActive(project)?'disabled':''}>${icon('trash')}</button>${xhsEligible(project)?`<button type="button" class="text-button history-send-draft" data-action="xhs-for-project" data-id="${h(project.id)}">送入小红书草稿 ${icon('arrow')}</button>`:''}</div>`;
+  return `<div class="history-row-actions ${card?'is-card':''}"><button type="button" class="text-button history-continue-chat" data-action="continue-chat" data-id="${h(project.id)}">${isActive(project)?'查看进度':project.pages?.length?'继续对话':'查看并继续'}</button><button type="button" class="icon-button history-delete" data-action="delete" data-id="${h(project.id)}" aria-label="删除 ${h(title)}" title="删除作品" ${isActive(project)?'disabled':''}>${icon('trash')}</button>${xhsEligible(project)?`<button type="button" class="text-button history-send-draft" data-action="xhs-for-project" data-id="${h(project.id)}">选择账号并发布 ${icon('arrow')}</button>`:''}</div>`;
 }
 function historyTableView(projects) {
   return `<div class="history-table-wrap"><table class="history-table"><caption class="sr-label">作品列表，包含内容类型、图片进度、状态、更新时间和操作</caption><thead><tr><th scope="col">作品</th><th scope="col">内容类型 / 风格</th><th scope="col">图片进度</th><th scope="col">状态</th><th scope="col">更新时间</th><th scope="col">操作</th></tr></thead><tbody>${projects.map(project=>{const {total,ready}=historyProjectProgress(project),title=project.title||'未命名作品';return `<tr><td><div class="history-project-cell">${historyCoverView(project)}<div><button type="button" class="history-table-title" data-action="open-project" data-id="${h(project.id)}" title="${h(title)}">${h(title)}</button><p title="${h(project.source||project.caption||'')}">${h(project.source||project.caption||'暂无创作需求')}</p></div></div></td><td><span class="history-mode">${h(modeText(project.mode)||'图文')}</span><small>${h(historyProjectStyle(project))}</small></td><td><span class="history-image-count">${ready}<span> / ${total} 张</span></span>${total?`<progress class="history-image-progress" value="${ready}" max="${total}" aria-label="已生成 ${ready} 张，共 ${total} 张"></progress>`:''}</td><td><span class="badge badge-${h(project.status)}">${h(statusText(project.status))}</span></td><td><time class="history-table-time">${h(historyProjectTime(project))}</time></td><td>${historyProjectActions(project)}</td></tr>`;}).join('')}</tbody></table></div><p class="history-table-mobile-hint">可横向滑动查看完整信息与操作</p>`;
@@ -2001,11 +2171,8 @@ app.addEventListener('input', event => {
   if(el.id==='guide-style-search'){state.guideStyleSearch=el.value;updateGuideStyleResults();}
   if(el.id==='trends-search'){state.trendSearch=el.value;state.trendLimit=24;updateTrendsResults();}
   if(el.id==='trends-keywords'){state.trendKeywordsDraft=el.value;state.trendKeywordsDirty=true;}
-  if(el.id==='xhs-account-name'&&state.xhsAccountEditor)state.xhsAccountEditor.accountName=el.value;
-  if(el.id==='xhs-account-group'&&state.xhsAccountEditor)state.xhsAccountEditor.group=el.value;
-  if(el.id==='xhs-note-search'){state.xhsNoteSearch=el.value;replaceXhsRegion('#xhs-notes-region',xhsNotesView());}
-  if(el.id==='xhs-account-search'){state.xhsAccountSearch=el.value;replaceXhsRegion('#xhs-overview-results',xhsAccountsResultsView());}
-  if(el.id==='xhs-draft-search'){state.xhsDraftSearch=el.value;replaceXhsRegion('#xhs-official-drafts-region',xhsOfficialDraftsView());replaceXhsRegion('#xhs-drafts-region',xhsDraftsView());}
+  if(el.id==='xhs-account-search'){state.xhsAccountSearch=el.value;replaceXhsRegion('#xhs-accounts-table-region',xhsAccountsTableView());}
+  if(el.id==='xhs-draft-search'){state.xhsDraftSearch=el.value;replaceXhsRegion('#xhs-official-drafts-region',publisherDraftsView());replaceXhsRegion('#xhs-drafts-region',xhsDraftsView());}
   if(el.id==='xhs-title'&&state.xhsPreview){state.xhsPreview.title=el.value;updateXhsComposerState();}
   if(el.id==='xhs-content'&&state.xhsPreview){state.xhsPreview.content=el.value;updateXhsComposerState();}
   if(el.id==='history-search'){state.search=el.value;state.historyPage=1;updateHistoryResults();}
@@ -2051,17 +2218,12 @@ app.addEventListener('change', async event => {
     saveGuidance();renderGuidance({preserve:true});return;
   }
   if(el.id==='guide-xhs-auto-delivery'){
-    if(state.guide.creation)return;
-    state.guide.xhsAutoDelivery=el.checked;if(el.checked)state.guide.targetPlatform='xhs';if(el.checked&&state.guide.xhsTargetAccountId===null&&xhsAccountId())state.guide.xhsTargetAccountId=xhsAccountId();saveGuidance();renderGuidance({preserve:true});return;
+    if(state.guide.creation||xhsDeliveryReadOnly())return;
+    state.guide.xhsAutoDelivery=el.checked;if(el.checked)state.guide.targetPlatform='xhs';saveGuidance();renderGuidance({preserve:true});return;
   }
-  if(el.id==='guide-xhs-target-account'){if(!state.guide.creation?.capture?.xhsAutoDelivery&&!state.guideProject?.xhsDelivery?.accountId){state.guide.xhsTargetAccountId=el.value;saveGuidance();renderGuidance({preserve:true});}return;}
   if(el.id==='history-page-size'){const size=Number(el.value);if(![12,24,48].includes(size))return;state.historyPageSize=size;state.historyPage=1;updateHistoryResults();return;}
   if(el.id==='history-sort'){if(!['updated','created'].includes(el.value))return;state.historySort=el.value;state.historyPage=1;updateHistoryResults();return;}
-  if(el.id==='xhs-account-group-filter'){state.xhsAccountGroup=el.value;updateXhs();return;}
-  if(el.id==='xhs-account-status-filter'){state.xhsAccountStatus=el.value;updateXhs();return;}
   if(el.id==='xhs-draft-sort'){if(['recent','oldest','title'].includes(el.value))state.xhsDraftSort=el.value;updateXhs();return;}
-  if(el.id==='xhs-note-sort'){state.xhsNoteSort=el.value;replaceXhsRegion('#xhs-notes-region',xhsNotesView());return;}
-  if(el.id==='xhs-note-limit'){state.xhsNoteLimit=Number(el.value)||50;return;}
   if(el.id==='xhs-project'){chooseXhsProject(el.value);return;}
   if(el.dataset.radarMaterialInput){const files=Array.from(el.files||[]);el.value='';await addRadarReferences(files,el.dataset.radarMaterialInput);}
   if(el.dataset.radarSkipField&&state.radarSkipDrafts[el.dataset.opportunityId])state.radarSkipDrafts[el.dataset.opportunityId][el.dataset.radarSkipField]=el.value;
@@ -2087,7 +2249,6 @@ app.addEventListener('submit', async event => {
   event.preventDefault();
   if(event.target.matches('.radar-skip-form'))await decideRadar(event.target.dataset.radarSkipId,'skip');
   if(event.target.id==='dingtalk-config-form')await saveDingtalkConfig();
-  if(event.target.id==='xhs-account-form')await saveXhsAccountEditor();
   if(event.target.id==='xhs-draft-form')await submitXhsDraft();
   if(event.target.id==='radar-profile-form')await saveRadarProfile(event.target);
   if(event.target.id==='radar-settings-form')await saveRadarSettings(event.target);
@@ -2118,26 +2279,40 @@ app.addEventListener('click', async event => {
     if(action==='dingtalk-reload')await loadDingtalk({quiet:Boolean(state.dingtalk)});
     if(action==='dingtalk-action')await runDingtalkAction(kind);
     if(action==='dingtalk-retry-delivery')await retryDingtalkDelivery(id);
-    if(button.closest('.xhs-more-menu'))button.closest('.xhs-more-menu').open=false;
-    if(action==='xhs-overview'){state.xhsSection='overview';rememberXhsLocation();updateXhs();return;}
-    if(action==='xhs-clear-filters'){state.xhsAccountSearch='';state.xhsAccountGroup='all';state.xhsAccountStatus='all';const region=document.querySelector('#xhs-management-region');if(region)region.innerHTML=xhsManagementView();return;}
-    if(action==='xhs-clear-draft-search'){state.xhsDraftSearch='';updateXhs();return;}
-    if(action==='xhs-draft-source'){if(!['official','submissions'].includes(button.dataset.source))return;state.xhsDraftSource=button.dataset.source;updateXhs();return;}
-    if(action==='xhs-account-add')openXhsAccountEditor();
-    if(action==='xhs-account-edit')openXhsAccountEditor(button.dataset.profileId);
-    if(action==='xhs-account-editor-close')closeXhsAccountEditor();
-    if(action==='xhs-account-select')await selectXhsAccount(button.dataset.profileId,{tab:button.dataset.tab});
-    if(action==='xhs-account-remove')await removeXhsAccount(button.dataset.profileId);
-    if(action==='xhs-tab')switchXhsTab(button.dataset.tab);
+    if(action==='xhs-accounts-refresh'){await loadXhsWorkspace();return;}
+    if(action==='xhs-metrics-period'){await accountMetricsView.show(xhsSelectedAccount(),button.dataset.kind);return;}
+    if(action==='xhs-metrics-read'){await accountMetricsView.show(xhsSelectedAccount(),accountMetricsView.currentPeriod(),true);return;}
+    if(action==='xhs-metrics-sync'){await accountMetricsView.sync();return;}
+    if(action==='xhs-notes-sync'){await runNotesSync(state.xhsRoute.accountId,true);return;}
+    if(action==='xhs-notes-page'){await loadXhsPublished(Number(button.dataset.offset));return;}
+    if(action==='xhs-account-open'){if(state.xhsAccounts?.some(row=>row.accountId===id)){setXhsRoute(xhsAccountRoute(id,'overview'));document.querySelector('#xhs-tab-overview')?.focus({preventScroll:true});}return;}
+    if(action==='xhs-account-list'){const prior=state.xhsRoute.accountId;setXhsRoute(xhsAccountRoute('','overview'));document.querySelector(`[data-action="xhs-account-open"][data-id="${CSS.escape(prior)}"]`)?.focus({preventScroll:true});return;}
+    if(action==='xhs-account-tab'){if(Object.hasOwn(XHS_ACCOUNT_TABS,button.dataset.tab)){setXhsRoute(xhsAccountRoute(state.xhsRoute.accountId,button.dataset.tab));document.getElementById('xhs-tab-'+button.dataset.tab)?.focus({preventScroll:true});}return;}
+    if(action==='xhs-draft-source'){if(!['official','submissions'].includes(button.dataset.source))return;state.xhsDraftSource=button.dataset.source;updateXhs();await loadOpenXhsDrafts();return;}
     if(action==='xhs-detail')await openXhsDetail(kind,id,button);
+    if(action==='xhs-edit-official'){
+      const current=state.xhsDetail;
+      if(current?.kind==='official-draft'&&current.detail?.editable&&current.accountId===xhsAccountId()){
+        editXhsDraft({draft:current.detail,account:{...state.xhs.account},projects:state.projects.filter(xhsEligible),api,h,isCurrent:()=>state.xhsDetail===current&&state.view==='xhs'&&xhsAccountId()===current.accountId,
+          finished:receipt=>{if(receipt){current.editReceipt={...receipt,submittedAt:Date.now()};current.editNotice='修改已受理，正在等待微服务核验。';}current.error='';current.loading=true;updateXhsDetail();void getXhsDetail(current,++xhsDetailRequestVersion);}});
+      }
+      return;
+    }
     if(action==='xhs-detail-close')closeXhsDetail();
-    if(action==='xhs-detail-read')await readXhsDetail();
     if(action==='xhs-detail-retry'&&state.xhsDetail){const current=state.xhsDetail;current.loading=true;current.error='';updateXhsDetail();await getXhsDetail(current,++xhsDetailRequestVersion);}
+    if(action==='xhs-service-page'&&xhsBound()){
+      const offset=Number(button.dataset.offset);
+      if(Number.isSafeInteger(offset)&&offset>=0)await syncXhsOfficialDrafts(offset);
+    }
     if(action==='xhs-official-sync')await syncXhsOfficialDrafts();
-    if(action==='xhs-official-open')await openXhsOfficialDraft(id);
     if(action==='xhs-reload')await loadXhs({quiet:Boolean(state.xhs),refreshProjects:true});
-    if(action==='xhs-action')await runXhsAction(button.dataset.kind);
-    if(action==='guide-xhs-action')await runXhsAction(button.dataset.kind,{accountId:guideTargetAccountId()});
+    if(action==='xhs-check-service')await checkXhsPublisher();
+    if(action==='guide-publisher-records'&&xhsBound()){
+      const target=xhsAccountRecord(guideTargetAccountId());
+      if(!target)return notify('当前服务中找不到本次送稿的账号。',true);
+      await navigateAdminPage('xhs',xhsAccountRoute(target.accountId,'drafts'));
+      state.xhsDraftSource='submissions';updateXhs();return;
+    }
     if(action==='guide-show-delivery'){
       const delivery = app.querySelector('.guide-xhs-delivery');
       if(delivery){
@@ -2150,9 +2325,14 @@ app.addEventListener('click', async event => {
     if(action==='guide-xhs-continue')await continueGuideXhsDelivery();
     if(action==='guide-xhs-version')await saveGuideXhsVersion();
     if(action==='guide-edit-xhs-copy'&&state.guideProject)await openXhsForProject(state.guideProject.id,guideTargetAccountId());
-    if(action==='guide-xhs-first')await saveGuideFirstXhsDraft(button.dataset.accountId);
     if(action==='guide-xhs-recheck')await recheckXhsDraft(id,{fromGuide:true});
     if(action==='xhs-for-project')await openXhsForProject(id);
+    if(action==='xhs-schedule-official'){
+      const current=state.xhsDetail;
+      if(current?.kind==='official-draft' && current.id===id && current.accountId===xhsAccountId()){
+        await openXhsPublishDialog(null,{api,h,initialAccountId:current.accountId,officialDraftId:id});
+      }
+    }
     if(action==='xhs-retry')await retryXhsDraft(id);
     if(action==='xhs-recheck')await recheckXhsDraft(id);
     if(action==='guide-image-add')document.querySelector('#guide-image-input')?.click();
@@ -2225,18 +2405,22 @@ app.addEventListener('click', async event => {
 });
 document.querySelector('#close-lightbox').addEventListener('click',()=>lightbox.close());
 lightbox.addEventListener('click',event=>{if(event.target===lightbox)lightbox.close();});
-app.addEventListener('load',event=>{if(event.target.matches?.('img[data-xhs-avatar]'))event.target.classList.add('is-loaded');},true);
-app.addEventListener('error',event=>{if(event.target.matches?.('img[data-xhs-avatar]'))event.target.hidden=true;},true);
-app.addEventListener('toggle',event=>{if(event.target.id==='xhs-missing-metrics')state.xhsMissingOpen=event.target.open;if(event.target.id==='xhs-composer-disclosure')state.xhsComposerOpen=event.target.open;if(event.target.id==='guide-delivery-settings')state.guideDeliverySettingsOpen=event.target.open;if(event.target.id==='trends-source-details')state.trendsSourcesOpen=event.target.open;},true);
+app.addEventListener('toggle',event=>{if(event.target.id==='xhs-composer-disclosure')state.xhsComposerOpen=event.target.open;if(event.target.id==='guide-delivery-settings')state.guideDeliverySettingsOpen=event.target.open;if(event.target.id==='trends-source-details')state.trendsSourcesOpen=event.target.open;},true);
 app.addEventListener('cancel',event=>{if(event.target.id==='trends-settings-dialog'){event.preventDefault();closeTrendsSettings();}},true);
 app.addEventListener('click',event=>{if(event.target.id!=='trends-settings-dialog')return;const rect=event.target.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeTrendsSettings();});
-document.addEventListener('click',event=>{document.querySelectorAll('.xhs-more-menu[open]').forEach(menu=>{if(!menu.contains(event.target))menu.open=false;});});
-document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;const menu=document.querySelector('.xhs-more-menu[open]');if(menu){menu.open=false;menu.querySelector('summary')?.focus();}});
-app.addEventListener('cancel',event=>{if(event.target.id==='xhs-account-dialog'){event.preventDefault();closeXhsAccountEditor();}if(event.target.id==='xhs-detail-dialog'){event.preventDefault();closeXhsDetail();}},true);
-app.addEventListener('click',event=>{const dialog=event.target;if(dialog.id==='xhs-account-dialog'){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeXhsAccountEditor();}if(dialog.id==='xhs-detail-dialog'){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeXhsDetail();}});
+app.addEventListener('cancel',event=>{if(event.target.id==='xhs-detail-dialog'){event.preventDefault();closeXhsDetail();}},true);
+app.addEventListener('click',event=>{const dialog=event.target;if(dialog.id==='xhs-detail-dialog'){const rect=dialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)closeXhsDetail();}});
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.adminMenuOpen){event.preventDefault();toggleAdminMenu(false);}});
+app.addEventListener('keydown',event=>{
+  const current=event.target.closest?.('.xhs-tabs [role=tab]');
+  if(!current)return;
+  const keys=Object.keys(XHS_ACCOUNT_TABS),index=keys.indexOf(current.dataset.tab);
+  const next={Home:0,End:keys.length-1,ArrowLeft:(index+keys.length-1)%keys.length,ArrowRight:(index+1)%keys.length}[event.key];
+  if(next===undefined)return;
+  event.preventDefault();
+  const tab=keys[next];setXhsRoute(xhsAccountRoute(state.xhsRoute.accountId,tab));document.getElementById('xhs-tab-'+tab)?.focus();
+});
 app.addEventListener('keydown',event=>{const tab=event.target.closest('.admin-provider-tabs [role=tab]');if(!tab)return;let kind;if(['ArrowRight','ArrowLeft'].includes(event.key))kind=tab.dataset.kind==='text'?'image':'text';if(event.key==='Home')kind='text';if(event.key==='End')kind='image';if(kind){event.preventDefault();switchSettingsProvider(kind);document.querySelector('#settings-tab-'+kind)?.focus();}});
-app.addEventListener('keydown',event=>{const tab=event.target.closest('.xhs-tabs [role="tab"]');if(!tab)return;const ids=['analytics','published','drafts'],i=ids.indexOf(tab.dataset.tab);let next;if(event.key==='ArrowRight')next=(i+1)%ids.length;if(event.key==='ArrowLeft')next=(i+ids.length-1)%ids.length;if(event.key==='Home')next=0;if(event.key==='End')next=ids.length-1;if(next!==undefined){event.preventDefault();switchXhsTab(ids[next],{focus:true});}});
 app.addEventListener('keydown',event=>{if(event.target.id==='guide-input'&&(event.metaKey||event.ctrlKey)&&event.key==='Enter'){event.preventDefault();sendGuidance();}});
 
 async function refreshHistory() {
@@ -2311,7 +2495,7 @@ async function boot() {
   if(state.view==='trends')await loadTrends();
   if(state.view==='radar')await loadRadar();
   if(state.view==='dingtalk')await loadDingtalk();
-  if(state.view==='xhs')await loadXhs({refreshProjects:true});
+  if(state.view==='xhs')await loadXhsWorkspace();
   else if(state.view==='briefing')await loadXhs({quiet:true});
 }
 boot();

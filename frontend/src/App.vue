@@ -12,24 +12,33 @@ const views = new Set(['briefing','radar','trends','xhs','dingtalk','history','s
 const frame = ref<HTMLIFrameElement>();
 const ready = ref(false);
 const currentView = computed(() => views.has(String(route.name)) ? String(route.name) : 'briefing');
-const initialView = currentView.value;
-const source = '/legacy?embedded=1&view=' + encodeURIComponent(initialView);
+function accountQuery(accountId: unknown, tab: unknown): Record<string, string> {
+  if (typeof accountId !== 'string' || !/^[a-zA-Z0-9_-]{1,120}$/.test(accountId)) return {};
+  return { accountId, tab: tab === 'drafts' || tab === 'published' ? tab : 'overview' };
+}
+const currentAccountQuery = computed(() => currentView.value === 'xhs' ? accountQuery(route.query.accountId, route.query.tab) : {});
+const source = '/legacy?' + new URLSearchParams({ embedded: '1', view: currentView.value, ...currentAccountQuery.value });
 const logo = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"%3E%3Cpath fill="%236397f3" d="M2 2h12v12H2zM18 2h12v12H18zM2 18h12v12H2z"/%3E%3Cpath fill="%233b6bdc" d="M18 18h12v12H18z"/%3E%3C/svg%3E';
 function sendView() {
   if (!ready.value) return;
-  frame.value?.contentWindow?.postMessage({ type: 'content-studio:set-view', view: currentView.value, requestId: ++requestId }, window.location.origin);
+  frame.value?.contentWindow?.postMessage({ type: 'content-studio:set-view', view: currentView.value, ...currentAccountQuery.value, requestId: ++requestId }, window.location.origin);
 }
 function receive(event: MessageEvent) {
   if (event.origin !== window.location.origin || event.source !== frame.value?.contentWindow) return;
   const data = event.data;
   if (!data || typeof data !== 'object' || !views.has(data.view)) return;
+  if (data.type === 'content-studio:xhs-route' && data.view === 'xhs') {
+    const target = { path: '/xhs', query: accountQuery(data.accountId, data.tab) };
+    if (route.fullPath !== router.resolve(target).fullPath) void router.push(target);
+    return;
+  }
   if (data.type === 'content-studio:ready') { ready.value = true; sendView(); }
   if (data.type === 'content-studio:navigate' && data.view !== currentView.value) void router.replace('/' + data.view);
   if (data.type === 'content-studio:view-ready' && data.requestId === requestId && data.view !== currentView.value) void router.replace('/' + data.view);
 }
-watch(currentView, sendView);
+watch(() => route.fullPath, sendView);
 watch(() => tabbarStore.renderRouteView, visible => {
-  if (visible === false && ready.value) frame.value?.contentWindow?.postMessage({ type: 'content-studio:refresh-view', view: currentView.value }, window.location.origin);
+  if (visible === false && ready.value) frame.value?.contentWindow?.postMessage({ type: 'content-studio:refresh-view', view: currentView.value, ...currentAccountQuery.value }, window.location.origin);
 });
 watch(() => route.meta.title, value => { document.title = `${String(value || '创作对话')} · 图文工坊`; }, { immediate: true });
 onMounted(() => window.addEventListener('message', receive));

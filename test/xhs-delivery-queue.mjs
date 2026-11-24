@@ -1,31 +1,30 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
-import { XhsDeliveryQueue } from '../lib/xhs-delivery.mjs';
+import { XhsDeliveryQueue, initialXhsDelivery } from '../lib/xhs-delivery.mjs';
 
-// All storage and browser behavior stays in memory. These tests never open a
-// browser, contact any provider, or write a real account's draft.
+// Exercise queue behavior with an in-memory publisher and work store.
 const A = '5f0000000000000000000001', B = '5f0000000000000000000002';
 const fingerprint = 'f'.repeat(64);
+const providerKey = 'publisher:fixture';
 const clone = value => structuredClone(value);
 
 function project(extra = {}) {
   return { id: randomUUID(), status: 'completed', chatStatus: 'idle', title: 'MOCK 工具图文', caption: 'MOCK 已确认的帖子正文',
     pages: [{ id: randomUUID(), status: 'done', imageUrl: '/media/mock-image.png' }],
-    xhsDelivery: { enabled: true, accountId: A, accountName: 'MOCK 工具作者', status: 'waiting_generation',
+    xhsDelivery: { enabled: true, providerKey, accountId: A, accountName: 'MOCK 工具作者', status: 'waiting_generation',
       attempted: false, draftId: null, fingerprint: null, message: '等待完成生成', ...extra } };
 }
 
 function fixture(initial = project(), overrides = {}) {
   const projects = new Map([[initial.id, clone(initial)]]), calls = [];
-  const state = { account: { id: A, nickname: 'MOCK 工具作者' }, connection: { state: 'connected' }, status: { busy: false }, drafts: [] };
+  const state = { providerKey, account: { id: A, nickname: 'MOCK 工具作者' }, connection: { state: 'connected' }, status: { busy: false }, drafts: [] };
   const store = { get: async id => clone(projects.get(id) || null), list: async () => clone([...projects.values()]),
     save: async item => { projects.set(item.id, clone(item)); } };
   const receipt = (payload, status = 'verified') => ({ id: randomUUID(), projectId: payload.projectId, accountId: payload.accountId,
     fingerprint: payload.fingerprint, status, message: `MOCK ${status}`, canRetry: status === 'failed',
     updatedAt: new Date().toISOString(), verifiedAt: status === 'verified' ? new Date().toISOString() : null });
   const xhs = { snapshot: () => clone(state),
-    checkLogin: async () => { calls.push({ action: 'check' }); },
     submitDraft: async payload => {
       calls.push({ action: 'submit', payload: clone(payload) }); const draft = receipt(payload); state.drafts.push(draft); return { draft: clone(draft) };
     },
@@ -43,85 +42,81 @@ function fixture(initial = project(), overrides = {}) {
   return { queue, store, xhs, state, calls, receipt, initial, get: () => store.get(initial.id) };
 }
 
-function multiFixture() {
-  const f = fixture(), other = { account: { id: B, nickname: 'MOCK 另一个账号' }, connection: { state: 'connected' }, status: { busy: false }, drafts: [] };
-  const states = new Map([[A, f.state], [B, other]]); let selected = B;
-  f.xhs.snapshot = () => clone(states.get(selected));
-  f.xhs.getAccountSnapshot = id => states.has(id) ? clone(states.get(id)) : null;
-  return { ...f, other, states, select: id => { selected = id; } };
-}
-
-test('a frozen A delivery stays on A while the account workspace selects B', async () => {
-  const f = multiFixture();
-  await f.queue.afterCreative(await f.get()); await f.queue.tail;
-  const p = f.queue.view(await f.get());
-  assert.equal(p.xhsDelivery.status, 'verified'); assert.equal(p.xhsDelivery.accountId, A);
-  assert.equal(f.xhs.snapshot().account.id, B, 'delivery cannot change the selected workspace');
-  assert.equal(f.calls.find(call => call.action === 'submit').payload.accountId, A);
-  assert.equal(f.other.drafts.length, 0); assert.equal(f.state.drafts.length, 1);
+test('a stale auto-send option with no provider configuration can still preserve the creative work', () => {
+  const state = { configured: false, providerKey: 'publisher:unconfigured', account: null, connection: { message: '请配置微服务' } };
+  const handoff = initialXhsDelivery(state, A);
+  assert.equal(handoff.accountId, null);
+  assert.equal(handoff.status, 'blocked');
+  assert.equal(handoff.attempted, false);
+  assert.equal(handoff.reason, 'not_configured');
 });
 
-test('delivery rechecks only its bound A session even while B is selected and connected', async () => {
-  const f = multiFixture(); f.state.connection.state = 'needs_attention';
-  f.xhs.checkLogin = async options => { assert.equal(options.accountId, A); f.calls.push({ action: 'check', accountId: options.accountId }); f.state.connection.state = 'connected'; };
-  await f.queue.enqueueVersion(f.initial.id, { accountId: A }); await f.queue.tail;
+test('missing remote media keeps completed work and requires an explicit handoff once configured', async () => {
+  const f = fixture();
+  f.state.deliveryConfiguration = { configured: false, message: '请配置微服务图源' };
+  const handoff = initialXhsDelivery(f.state, A);
+  assert.equal(handoff.accountId, A);
+  assert.equal(handoff.reason, 'media_not_configured');
+  await f.queue.afterCreative(f.initial);
+  assert.equal(f.queue.view(await f.get()).xhsDelivery.canContinue, false);
+  await assert.rejects(f.queue.enqueueVersion(f.initial.id, { accountId: A }), { status: 503 });
+  await assert.rejects(f.queue.enqueue(f.initial.id, { manual: true, accountId: A }), { status: 503 });
+  f.state.deliveryConfiguration.configured = true;
+  await f.queue.afterCreative(await f.get());
+  assert.equal(f.queue.view(await f.get()).xhsDelivery.canContinue, true);
+  assert.deepEqual(f.calls, []);
+});
+
+test('archived browser and foreign-service deliveries never attach or replay, even with the same account', async () => {
+  for (const origin of [undefined, 'local', 'publisher:other-endpoint']) {
+    const original = project({ providerKey: origin, status: 'queued', fingerprint, attempted: true });
+    const f = fixture(original);
+    await f.queue.recover();
+    await f.queue.afterCreative(original);
+    assert.deepEqual(await f.get(), original);
+    const shown = f.queue.view(original).xhsDelivery;
+    assert.equal(shown.archived, true); assert.equal(shown.running, false);
+    assert.equal(shown.canContinue, false); assert.equal(shown.canRecheck, false); assert.equal(shown.canSaveVersion, false);
+    await assert.rejects(f.queue.enqueueVersion(original.id, { accountId: A }), { status: 409 });
+    await assert.rejects(f.queue.enqueue(original.id, { accountId: A, manual: true }), { status: 409 });
+    assert.deepEqual(f.calls, []);
+  }
+});
+
+test('if service preflight blocks submission, a deliberate retry can resume without recreating the work', async () => {
+  const f = fixture(), submit = f.xhs.submitDraft;
+  f.state.connection.state = 'needs_attention';
+  f.xhs.submitDraft = async () => { throw Object.assign(new Error('worker 已暂停'), { submissionNotAttempted: true }); };
+  await f.queue.afterCreative(await f.get()); await f.queue.tail;
+  const blocked = f.queue.view(await f.get()).xhsDelivery;
+  assert.equal(blocked.status, 'blocked'); assert.equal(blocked.attempted, false); assert.equal(blocked.canContinue, true);
+  f.xhs.submitDraft = submit;
+  await f.queue.enqueue(f.initial.id, { accountId: A, manual: true }); await f.queue.tail;
   assert.equal(f.queue.view(await f.get()).xhsDelivery.status, 'verified');
-  assert.equal(f.calls.find(call => call.action === 'check').accountId, A);
-  assert.equal(f.xhs.snapshot().account.id, B);
+  assert.equal(f.calls.filter(call => call.action === 'submit').length, 1);
 });
 
-test('removing the bound account blocks its delivery instead of falling back to selected B', async () => {
-  const f = multiFixture(); f.states.delete(A);
-  await f.queue.afterCreative(await f.get()); await f.queue.tail;
-  const p = f.queue.view(await f.get());
-  assert.equal(p.xhsDelivery.status, 'blocked'); assert.equal(p.xhsDelivery.attempted, false);
-  assert.equal(p.xhsDelivery.accountId, A); assert.deepEqual(f.calls, []); assert.equal(f.other.drafts.length, 0);
-});
-
-test('a B browser task does not block A delivery and an A browser task is respected', async () => {
-  const f = multiFixture(); f.other.status.busy = true;
-  f.queue.wait = async () => { assert.fail('A must not wait for the unrelated B worker'); };
-  await f.queue.afterCreative(await f.get()); await f.queue.tail;
-  assert.equal((await f.get()).xhsDelivery.status, 'verified');
-  const g = multiFixture(); g.state.status.busy = true; let waits = 0;
-  g.queue.wait = async () => { waits++; g.state.status.busy = false; };
-  await g.queue.afterCreative(await g.get()); await g.queue.tail;
-  assert.ok(waits > 0); assert.equal((await g.get()).xhsDelivery.status, 'verified');
-});
-
-test('a saved binding is checked on explicit send after restart without a manual connection step', async () => {
-  const p = project(); delete p.xhsDelivery;
-  const f = fixture(p); f.state.connection.state = 'needs_attention';
-  f.xhs.checkLogin = async () => { f.calls.push({ action: 'check' }); f.state.connection.state = 'connected'; };
-  await f.queue.recover(); f.queue.view(await f.get());
-  assert.deepEqual(f.calls, [], 'Startup and reads never open the bound account');
-  await f.queue.enqueueVersion(p.id, { accountId: A }); await f.queue.tail;
-  assert.equal(f.queue.view(await f.get()).xhsDelivery.status, 'verified');
-  assert.deepEqual(f.calls.map(call => call.action), ['check', 'prepare', 'submit']);
-});
-
-test('expired bound sessions stop before preparing or writing and can be checked again by a deliberate retry', async () => {
-  const f = fixture(project({status:'blocked'})); f.state.connection.state = 'login_required';
-  let valid = false;
-  f.xhs.checkLogin = async () => { f.calls.push({ action:'check' }); f.state.connection = {state:valid?'connected':'login_required',message:'MOCK 请重新扫码绑定'}; };
-  await f.queue.enqueue(f.initial.id, {manual:true,accountId:A}); await f.queue.tail;
-  let p = f.queue.view(await f.get());
-  assert.equal(p.xhsDelivery.status,'blocked'); assert.equal(p.xhsDelivery.attempted,false);
-  assert.deepEqual(f.calls.map(call=>call.action),['check']);
-  assert.match(p.xhsDelivery.message,/重新扫码/);
-  valid = true;
-  await f.queue.enqueue(f.initial.id, {manual:true,accountId:A}); await f.queue.tail;
-  p = f.queue.view(await f.get()); assert.equal(p.xhsDelivery.status,'verified');
-  assert.deepEqual(f.calls.map(call=>call.action),['check','check','prepare','submit']);
-});
-
-test('a different live account cannot receive the saved binding delivery', async () => {
-  const f = fixture(); f.state.connection.state = 'needs_attention';
-  f.xhs.checkLogin = async () => { f.calls.push({action:'check'}); f.state.account.id=B; f.state.connection.state='connected'; };
-  await f.queue.enqueueVersion(f.initial.id,{accountId:A}); await f.queue.tail;
-  assert.equal((await f.get()).xhsDelivery.accountId,A);
-  assert.equal((await f.get()).xhsDelivery.status,'blocked');
-  assert.deepEqual(f.calls.map(call=>call.action),['check']);
+test('the original automatic target stays pinned when the default has a different receipt store', async () => {
+  const f = fixture(project({ accountId: B, providerKey: 'publisher:second' }));
+  const second = { ...f.state, providerKey: 'publisher:second', account: { id: B, nickname: '乙' }, drafts: [] };
+  f.xhs.accountId = A;
+  f.xhs.getAccountSnapshot = id => id === B ? clone(second) : id === A ? clone(f.state) : null;
+  f.xhs.forAccount = async id => {
+    assert.equal(id, B);
+    return { submitDraft: async input => {
+      assert.equal(input.accountId, B);
+      const draft = f.receipt(input);
+      second.drafts.push(draft);
+      return { draft };
+    } };
+  };
+  await f.queue.afterCreative(await f.get());
+  await f.queue.tail;
+  const done = f.queue.view(await f.get()).xhsDelivery;
+  assert.equal(done.accountId, B);
+  assert.equal(done.status, 'verified');
+  assert.equal(done.draftId, second.drafts[0].id);
+  assert.deepEqual(f.state.drafts, []);
 });
 
 test('restart between creative completion and enqueue offers explicit continuation without an automatic send', async () => {
@@ -132,7 +127,7 @@ test('restart between creative completion and enqueue offers explicit continuati
   assert.equal(value.xhsDelivery.status, 'interrupted');
   assert.equal(value.xhsDelivery.attempted, false);
   assert.equal(value.xhsDelivery.canContinue, true);
-  assert.deepEqual(f.calls, [], 'Recovery and safe GET-like views may not invoke a browser');
+  assert.deepEqual(f.calls, [], 'Recovery and safe GET-like views may not write to the service');
   f.queue.view(await f.get()); await f.queue.recover();
   assert.deepEqual(f.calls, [], 'Repeated recovery cannot restore an external write');
   await f.queue.enqueue(f.initial.id, { manual: true, accountId: A });
@@ -178,7 +173,7 @@ test('a missing draft ID is recovered from a matching frozen fingerprint without
   assert.deepEqual(f.calls, []);
 });
 
-test('queue timeout keeps the work frozen while its accepted browser operation is still running', async () => {
+test('the queue releases capacity while the accepted remote operation still protects the work', async () => {
   const f = fixture(project(), { maxWaitMs: 0, wait: () => new Promise(resolve => setTimeout(resolve, 2)) });
   f.xhs.submitDraft = async payload => {
     f.calls.push({ action: 'submit', payload: clone(payload) }); const draft = f.receipt(payload, 'running');
@@ -187,7 +182,7 @@ test('queue timeout keeps the work frozen while its accepted browser operation i
   await f.queue.afterCreative(await f.get()); await f.queue.tail;
   let saved = await f.get();
   assert.equal(f.queue.active.has(saved.id), false, 'The bounded queue wait has already ended');
-  assert.equal(f.state.status.busy, true, 'The browser has not acknowledged an outcome yet');
+  assert.equal(f.state.status.busy, true, 'The publisher has not acknowledged an outcome yet');
   assert.equal(f.queue.isProcessing(saved), true, 'Accepted writes must still block project edits and deletion');
   assert.equal(f.queue.view(saved).xhsDelivery.running, true);
   assert.equal(f.queue.view(saved).xhsDelivery.canContinue, false);

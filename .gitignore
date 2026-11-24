@@ -4,6 +4,8 @@
 .env.*
 !.env.example
 .baoyu-skills/
+# Internal service handoff includes registered account identities and environment settings.
+/xhs-publisher-backend-integration.zip
 
 # Local snapshots and verification screenshots are not project source.
 /备份/
